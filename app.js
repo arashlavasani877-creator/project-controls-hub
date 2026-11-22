@@ -128,11 +128,65 @@ async function startApp(){try{onAuthStateChanged(auth,user=>{APP.authVersion++;c
 let writeQueue=Promise.resolve(),pendingOps=new Map(),pendingSeq=0,outboxStorageError='',lastWriteFailures=[];
 const pendingStoreKey=()=>`pch-unsynced-v1:${APP.user?.uid||'anonymous'}`;
 const pendingOpKey=(collectionName,docId)=>`${collectionName}/${docId}`;
+// Never silently discard an edit rejected because its task was deleted elsewhere.
+const conflictStoreKey=()=>`pch-conflicts-v15:${APP.user?.uid||'anonymous'}`;
+function archiveRejectedTask(op,reason){
+ try{
+  const saved=JSON.parse(localStorage.getItem(conflictStoreKey())||'[]');
+  saved.push({at:new Date().toISOString(),reason,op:copy(op)});
+  localStorage.setItem(conflictStoreKey(),JSON.stringify(saved.slice(-250)));
+  return true;
+ }catch(e){console.error('Could not back up a deleted-task conflict',e);return false}
+}
+function knownTaskPaths(id){
+ const paths=new Set();
+ for(const [source,entries] of Object.entries(APP.sources.tasks||{})){
+  if((entries||[]).some(x=>x.id===id))paths.add(source.startsWith('recurrenceInstances-')?'recurrenceInstances':'tasks');
+ }
+ return [...paths];
+}
+function queueExplicitDelete(key,item){
+ if(!item?.id)return;
+ // A historical bug could put one logical ID in BOTH physical collections.
+ // A delete from the manager must remove both, not leave a phantom in another panel.
+ const paths=key==='tasks'?knownTaskPaths(item.id):[];
+ for(const cname of (paths.length?paths:[collectionFor(key,item,item.id)]))
+  stageOperation({type:'delete',key,cname,id:item.id});
+}
+
+
 function persistPendingOps(){if(!APP.user?.uid)return false;try{localStorage.setItem(pendingStoreKey(),JSON.stringify([...pendingOps.values()]));outboxStorageError='';return true}catch(e){console.warn('PCH local outbox storage failed',e);outboxStorageError=`پشتیبان محلی ذخیره نشد (${e?.name||'storage'})`;return false}}
-function loadPendingOps(){pendingOps=new Map();pendingSeq=0;outboxStorageError='';try{const saved=JSON.parse(localStorage.getItem(pendingStoreKey())||'[]');for(const op of saved){if(!op?.cname||!op.id||!op.key)continue;op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.cname,op.id),op)}}catch(e){console.warn('PCH local outbox could not be read',e);outboxStorageError='خواندن صف ذخیرهٔ محلی ممکن نشد'}}
+function loadPendingOps(){
+ pendingOps=new Map();pendingSeq=0;outboxStorageError='';
+ try{
+  const raw=localStorage.getItem(pendingStoreKey())||'[]',saved=JSON.parse(raw);
+  if(saved.length&&!localStorage.getItem(`pch-pre-v15-outbox:${APP.user?.uid}`))
+   localStorage.setItem(`pch-pre-v15-outbox:${APP.user?.uid}`,raw);
+  for(const op of saved){if(!op?.cname||!op.id||!op.key)continue;op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.cname,op.id),op)}
+ }catch(e){console.warn('PCH local outbox could not be read',e);outboxStorageError='خواندن صف ذخیرهٔ محلی ممکن نشد'}
+}
 function applyPendingOverlay(key,rows){const map=new Map(rows.map(x=>[x.id,copy(x)]));for(const op of pendingOps.values()){if(op.key!==key)continue;if(op.type==='delete')map.delete(op.id);else map.set(op.id,copy(op.value))}return [...map.values()]}
-const collectionFor=(key,value,docId)=>key==='tasks'?(APP.remotePaths[docId]||(value?.seriesId?'recurrenceInstances':'tasks')):KEY_TO_COLLECTION[key];
-function stageOperation(op){op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.cname,op.id),op)}
+const collectionFor=(key,value,docId)=>{
+ if(key!=='tasks')return KEY_TO_COLLECTION[key];
+ const sources=knownTaskPaths(docId);
+ if(sources.length===1)return sources[0];
+ if(sources.includes('recurrenceInstances')&&value?.seriesId)return 'recurrenceInstances';
+ return value?.seriesId?'recurrenceInstances':(sources[0]||APP.remotePaths[docId]||'tasks');
+};
+function stageOperation(op){
+ // One logical task must never be sent to both Firestore collections.
+ if(op.key==='tasks')for(const [key,prior] of [...pendingOps]){
+  if(prior.key==='tasks'&&prior.id===op.id&&key!==pendingOpKey(op.cname,op.id)){
+   if(prior.type==='delete'&&op.type==='delete')continue;
+   if(prior.type==='set'){
+    // Preserve unsaved work before replacing its path or deleting the task.
+    if(!archiveRejectedTask(prior,op.type==='delete'?'Superseded by explicit manager delete':'Duplicate queued path resolved to '+op.cname))continue;
+   }
+   pendingOps.delete(key);
+  }
+ }
+ op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.cname,op.id),op)
+}
 function applyRemoteOperation(op){const list=remoteD[op.key]||[],ix=list.findIndex(x=>x.id===op.id);if(op.type==='delete'){if(ix>=0)list.splice(ix,1)}else if(ix>=0)list[ix]=copy(op.value);else list.push(copy(op.value));remoteD[op.key]=list}
 function firestorePayload(op){
  const model=op.cname==='recurrenceInstances'?'instances':({projects:'projects',users:'users',membershipRequests:'requests',activityHistory:'events',recurrences:'recurrences',evaluations:'evaluations'}[op.cname]||'tasks');
@@ -158,40 +212,66 @@ function firestorePayload(op){
 const STAFF_EDITABLE_FIELDS=['title','projectId','due','priority','description','status','blockReason','notes','submittedAt','updatedAt'];
 async function writeOne(op){
  const ref=doc(db,op.cname,op.id);
- if(op.type==='delete'){await deleteDoc(ref);return {written:true}}
+ if(op.type==='delete'){
+  // A deletion is idempotent. Record an immutable tombstone for task IDs so an
+  // old queued update on another phone cannot recreate the same task.
+  if(op.key==='tasks'){
+   const marker=doc(db,'deletedTasks',op.id);
+   await runTransaction(db,async tx=>{
+    const dead=await tx.get(marker),existing=await tx.get(ref);
+    if(!dead.exists())tx.set(marker,{deleted:true,deletedAt:serverTimestamp()});
+    if(existing.exists())tx.delete(ref);
+   });
+   return {written:true};
+  }
+  // Some old outboxes retry a delete after it already succeeded. Do not
+  // attempt a second delete against a missing Firestore resource.
+  const existing=await getDoc(ref);
+  if(existing.exists())await deleteDoc(ref);
+  return {written:existing.exists(),alreadyExists:!existing.exists()};
+ }
+ if(op.key==='tasks'){
+  const tombstone=await getDoc(doc(db,'deletedTasks',op.id));
+  if(tombstone.exists()){
+   const e=new Error('این فعالیت در دستگاه دیگر توسط مدیر حذف شده و نباید دوباره ساخته شود.');
+   e.code='deleted-remotely';throw e;
+  }
+ }
+ if(op.cname==='activityHistory'){
+  // Immutable audit entries can already have been created before a callback
+  // reported an unrelated failure. Retrying setDoc would be an illegal update.
+  const existing=await getDoc(ref);
+  if(existing.exists())return {written:false,alreadyExists:true};
+  await setDoc(ref,firestorePayload(op));
+  return {written:true};
+ }
  if(op.cname==='recurrenceInstances'&&op.createOnly){
-  // Deterministic occurrence IDs: never overwrite a task another device already created.
   let created=false,updated=false;
   await runTransaction(db,async tx=>{
    created=false;updated=false;
-   const existing=await tx.get(ref);
-   const desired=firestorePayload(op);
+   const existing=await tx.get(ref),desired=firestorePayload(op);
    if(!existing.exists()){tx.set(ref,desired);created=true;return}
-   // A second device may have materialized this deterministic instance already.
-   // Apply the pending editable changes instead of either overwriting the entire
-   // document or silently discarding an unsynced status update.
    const original=existing.data()||{},patch={};
    const keys=isAdmin()?Object.keys(desired):STAFF_EDITABLE_FIELDS;
-   for(const field of keys){
-    if(Object.prototype.hasOwnProperty.call(desired,field)&&
+   for(const field of keys)if(Object.prototype.hasOwnProperty.call(desired,field)&&
        JSON.stringify(original[field])!==JSON.stringify(desired[field]))patch[field]=desired[field];
-   }
    if(Object.keys(patch).length){tx.update(ref,patch);updated=true}
   });
   return {written:created||updated,alreadyExists:!created&&!updated};
  }
- // Patch existing task documents rather than replacing them. This avoids wiping
- // another user's changes and preserves manager-controlled fields on staff updates.
- if(op.cname==='tasks'||op.cname==='recurrenceInstances'){
-  const prior=(remoteD.tasks||[]).find(x=>x.id===op.id);
+ if(op.cname==='tasks'||op.cname==='recurrenceInstances'||op.cname==='recurrences'){
+  const prior=op.key==='tasks'?(remoteD.tasks||[]).find(x=>x.id===op.id):
+    (remoteD.recurrences||[]).find(x=>x.id===op.id);
+  if(op.key==='tasks'&&!prior&&!op.createOnly){
+   const e=new Error('سند این فعالیت دیگر در فهرست مجاز سرور وجود ندارد؛ از ایجاد دوباره آن جلوگیری شد.');
+   e.code='deleted-remotely';throw e;
+  }
   if(prior){
-   const model=op.cname==='recurrenceInstances'?'instances':'tasks';
+   const model=op.cname==='recurrenceInstances'?'instances':op.cname==='recurrences'?'recurrences':'tasks';
    const oldPayload=toFirestore(model,prior),newPayload=firestorePayload(op),patch={};
-   const keys=isAdmin()?Object.keys(newPayload):STAFF_EDITABLE_FIELDS;
-   for(const field of keys){
-    if(Object.prototype.hasOwnProperty.call(newPayload,field)&&
+   const keys=op.cname==='recurrences'?Object.keys(newPayload):isAdmin()?Object.keys(newPayload):STAFF_EDITABLE_FIELDS;
+   for(const field of keys)if(Object.prototype.hasOwnProperty.call(newPayload,field)&&
        JSON.stringify(oldPayload[field])!==JSON.stringify(newPayload[field]))patch[field]=newPayload[field];
-   }
    if(Object.keys(patch).length)await updateDoc(ref,patch);
    return {written:!!Object.keys(patch).length};
   }
@@ -208,7 +288,16 @@ const worker=async()=>{while(cursor<phaseOps.length){const op=phaseOps[cursor++]
 if(op.cname==='recurrenceInstances'&&op.type!=='delete'&&op.value?.seriesId)pre=pendingOpKey('recurrences',op.value.seriesId);
 if(op.cname==='evaluations'&&op.type!=='delete'&&op.value?.taskId){const linked=list.find(x=>x.id===op.value.taskId&&(x.cname==='tasks'||x.cname==='recurrenceInstances'));if(linked)pre=pendingOpKey(linked.cname,linked.id)}
 if(pre&&failedKeys.has(pre)){const error=new Error('ذخیره پیش‌نیاز ناموفق بود؛ این مورد برای جلوگیری از ثبت ناسازگار در صف ماند.');error.code='dependency-failed';failed.push({op,error});failedKeys.add(key);continue}
-try{const result=await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);if(!result?.alreadyExists)applyRemoteOperation(op)}}catch(error){failed.push({op,error});failedKeys.add(key)}}};
+try{const result=await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);applyRemoteOperation(op)}}catch(error){
+  if(error?.code==='deleted-remotely'&&archiveRejectedTask(op,error.message)){
+   const current=pendingOps.get(key);
+   if(current&&current.rev===op.rev){pendingOps.delete(key);D.tasks=D.tasks.filter(t=>t.id!==op.id)}
+   // The rejected edit is in a separate local recovery archive; do not
+   // reinsert a task the manager explicitly deleted.
+   continue;
+  }
+  failed.push({op,error});failedKeys.add(key)
+ }}};
 await Promise.all(Array.from({length:Math.min(6,phaseOps.length)},worker))}
 persistPendingOps();
 lastWriteFailures=failed.map(({op,error})=>({collection:op.cname,documentId:op.id,kind:op.type,createOnly:!!op.createOnly,seriesId:op.value?.seriesId||null,status:op.value?.status||null,code:error?.code||error?.name||'unknown',message:String(error?.message||'').slice(0,300)}));
@@ -216,19 +305,25 @@ if(failed.length){const first=failed[0].error,code=first.code||first.name||'unkn
 APP.syncError='';return true}
 function persist(){
  if(!APP.user||!APP.approved||APP.readOnlyPreview)return Promise.reject(new Error('حساب فعال برای نوشتن لازم است.'));
+ if(APP.workspaceReadError)return Promise.reject(new Error('همگام‌سازی یکی از فهرست‌ها با خطا مواجه شده؛ قبل از ذخیره مجدد اتصال و سطح دسترسی را بررسی کن.'));
  const snapshot=copy(D);APP.pendingWrites++;APP.syncError='';
  const arrays=['projects','users','requests','tasks','recurrences','evaluations','events'];
  for(const key of arrays){const before=new Map((remoteD[key]||[]).map(x=>[x.id,x])),after=new Map((snapshot[key]||[]).map(x=>[x.id,x]));
-  for(const [docId,old] of before)if(!after.has(docId)){if(key==='events')continue;const cname=collectionFor(key,old,docId);stageOperation({type:'delete',key,cname,id:docId})}
-  for(const [docId,value] of after){const old=before.get(docId);if(old&&JSON.stringify(old)===JSON.stringify(value))continue;const cname=collectionFor(key,value,docId),createOnly=key==='tasks'&&value.seriesId&&!old;stageOperation({type:'set',key,cname,id:docId,value:copy(value),createOnly:!!createOnly})}
-  for(const [opKey,op] of [...pendingOps])if(op.key===key&&!after.has(op.id)&&!before.has(op.id))pendingOps.delete(opKey)
+  // A partial query snapshot or reassignment must never be interpreted as a
+  // user-requested delete. Task and recurrence deletion is staged explicitly.
+  for(const [docId,old] of before)if(!after.has(docId)){
+   if(key==='events'||key==='tasks'||key==='recurrences')continue;
+   const cname=collectionFor(key,old,docId);stageOperation({type:'delete',key,cname,id:docId})
+  }
+  for(const [docId,value] of after){const old=before.get(docId);if(old&&JSON.stringify(old)===JSON.stringify(value))continue;const cname=collectionFor(key,value,docId),createOnly=key==='tasks'&&!old;stageOperation({type:'set',key,cname,id:docId,value:copy(value),createOnly:!!createOnly})}
+  for(const [opKey,op] of [...pendingOps])if(op.type!=='delete'&&op.key===key&&!after.has(op.id)&&!before.has(op.id))pendingOps.delete(opKey)
  }
  persistPendingOps();render();
  const job=()=>flushPendingOps();const run=writeQueue.then(job,job);writeQueue=run.catch(()=>{});
  return run.finally(()=>{APP.pendingWrites=Math.max(0,APP.pendingWrites-1);render()})
 }
 function save(message='تغییرات ذخیره شد.'){render();persist().catch(showSyncFailure)}
-function startWorkspace(){clearSubscriptions();loadPendingOps();APP.loadingWorkspace=true;APP.syncError='';const admin=isAdmin(),uid=APP.user.uid;APP.readsReady=true;
+function startWorkspace(){clearSubscriptions();loadPendingOps();APP.loadingWorkspace=true;APP.workspaceReadError=false;APP.syncError='';const admin=isAdmin(),uid=APP.user.uid;APP.readsReady=true;
  if(admin)listenQuery('projects','projects',collection(db,'projects'),'projects');else if(APP.profile.projects.length){for(const pid of APP.profile.projects)listenDocument('projects','project-'+pid,doc(db,'projects',pid),'projects')}else{syncSource('projects','projects',[],'projects')}
  if(admin)listenQuery('users','users',collection(db,'users'),'users');else listenDocument('users','users-self',doc(db,'users',uid),'users');
  if(admin)listenQuery('requests','requests',query(collection(db,'membershipRequests'),where('status','==','pending')),'membershipRequests');else listenDocument('requests','request-self',doc(db,'membershipRequests',uid),'membershipRequests');
@@ -237,11 +332,106 @@ function startWorkspace(){clearSubscriptions();loadPendingOps();APP.loadingWorks
  else{listenQuery('recurrences','recurrences-assigned',query(collection(db,'recurrences'),where('visibility','==','team'),where('assigneeUid','==',uid)),'recurrences');listenQuery('recurrences','recurrences-created',query(collection(db,'recurrences'),where('visibility','==','team'),where('createdByUid','==',uid)),'recurrences')}
  const hist=collection(db,'activityHistory');if(admin){listenQuery('events','history-team',query(hist,where('visibility','==','team')),'activityHistory');if(isProjectControlsManager())listenQuery('events','history-private',query(hist,where('visibility','==','manager_private'),where('ownerUid','==',uid)),'activityHistory')}
  APP.expectedReads=APP.subscriptions.length;APP.readsReady=true;if(APP.expectedReads===0){APP.loadingWorkspace=false;render()}}
-function clearSubscriptions(){for(const stop of APP.subscriptions){try{stop()}catch{}}APP.subscriptions=[];APP.sources={};APP.remotePaths={};APP.expectedReads=0;APP.readyReads=0;APP.readyReadSet=new Set();APP.readsReady=false;APP.generationStarted=false;D=blank();remoteD=blank()}
-function listenQuery(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,snap=>{const rows=snap.docs.map(d=>normalizeDocument(key,d));syncSource(key,source,rows,collectionName);noteReadReady(source)},err=>{APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
-function listenDocument(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,snap=>{syncSource(key,source,snap.exists()?[normalizeDocument(key,snap)]:[],collectionName);noteReadReady(source)},err=>{APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
-function syncSource(key,source,rows,collectionName){APP.sources[key]||={};APP.sources[key][source]=rows;const all=Object.values(APP.sources[key]).flat(),map=new Map(all.map(x=>[x.id,x]));const merged=[...map.values()];if(key==='tasks'){remoteD.tasks=copy(merged);D.tasks=applyPendingOverlay('tasks',merged);for(const r of merged)APP.remotePaths[r.id]=r.seriesId?'recurrenceInstances':'tasks'}else if(key==='permissions'){D.permissions=rows[0]?.permissions||PERMS();remoteD.permissions=copy(D.permissions)}else{remoteD[key]=copy(merged);D[key]=applyPendingOverlay(key,merged)}for(const x of merged)if(collectionName)APP.remotePaths[x.id]=collectionName;if(key==='users'&&!isAdmin()){const mine=merged.find(x=>x.id===APP.user?.uid);if(mine&&mine.status==='disabled'){APP.status='disabled';APP.approved=false;APP.profile=mine;clearSubscriptions();APP.loading=false;APP.loadingWorkspace=false;render()}}}
-function noteReadReady(name){APP.readyReadSet||=new Set();if(!APP.readyReadSet.has(name)){APP.readyReadSet.add(name);APP.readyReads=APP.readyReadSet.size}if(APP.readsReady&&APP.readyReads>=APP.expectedReads){const wasLoading=APP.loadingWorkspace;APP.loadingWorkspace=false;if(wasLoading)APP.syncError='';render();if(wasLoading&&!APP.generationStarted){APP.generationStarted=true;const n=generateDue();if(n||pendingOps.size)persist().catch(reportBackgroundSyncFailure)}}}
+function clearSubscriptions(){for(const stop of APP.subscriptions){try{stop()}catch{}}APP.workspaceReadError=false;APP.subscriptions=[];APP.sources={};APP.remotePaths={};APP.expectedReads=0;APP.readyReads=0;APP.readyReadSet=new Set();APP.readsReady=false;APP.generationStarted=false;D=blank();remoteD=blank()}
+function listenQuery(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,snap=>{const rows=snap.docs.map(d=>normalizeDocument(key,d));syncSource(key,source,rows,collectionName);noteReadReady(source)},err=>{APP.workspaceReadError=true;APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
+function listenDocument(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,snap=>{syncSource(key,source,snap.exists()?[normalizeDocument(key,snap)]:[],collectionName);noteReadReady(source)},err=>{APP.workspaceReadError=true;APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
+function reconcilePendingTaskPaths(){
+ if(!APP.readsReady||APP.readyReads<APP.expectedReads||APP.workspaceReadError)return;
+ let changed=false;
+ const byId=new Map();
+ for(const op of pendingOps.values())if(op.key==='tasks'){
+  if(!byId.has(op.id))byId.set(op.id,[]);
+  byId.get(op.id).push(op);
+ }
+ for(const [id,ops] of byId){
+  const sources=knownTaskPaths(id),remote=(remoteD.tasks||[]).find(x=>x.id===id);
+  const sets=ops.filter(op=>op.type==='set').sort((a,b)=>a.rev-b.rev);
+  const deletes=ops.filter(op=>op.type==='delete');
+  if(deletes.length){
+   // Explicit manager deletion wins over an older pending local edit.
+   for(const op of sets){
+    if(archiveRejectedTask(op,'Queued edit superseded by a manager delete')){
+     pendingOps.delete(pendingOpKey(op.cname,id));changed=true;
+    }
+   }
+   // Keep one delete for every physical document that still exists.
+   for(const path of sources){
+    if(!deletes.some(op=>op.cname===path)){
+     stageOperation({type:'delete',key:'tasks',cname:path,id});changed=true;
+    }
+   }
+   continue;
+  }
+  if(!sets.length)continue;
+  const newest=sets[sets.length-1];
+  for(const op of sets.slice(0,-1)){
+   if(op.cname===newest.cname)continue;
+   if(archiveRejectedTask(op,'Duplicate queued task path')){
+    pendingOps.delete(pendingOpKey(op.cname,id));changed=true;
+   }
+  }
+  if(!sources.length&&!newest.createOnly){
+   if(archiveRejectedTask(newest,'Old edit whose task is no longer present on the server')){
+    pendingOps.delete(pendingOpKey(newest.cname,id));changed=true;
+   }
+   continue;
+  }
+  const canonical=sources.length===1?sources[0]:
+   (sources.includes('recurrenceInstances')&&(remote?.seriesId||newest.value?.seriesId)?'recurrenceInstances':sources[0]);
+  if(canonical&&newest.cname!==canonical){
+   if(archiveRejectedTask(newest,'Corrected stale physical collection from '+newest.cname+' to '+canonical)){
+    pendingOps.delete(pendingOpKey(newest.cname,id));
+    stageOperation({...newest,cname:canonical,createOnly:false});changed=true;
+   }
+  }
+ }
+ if(changed){persistPendingOps();D.tasks=applyPendingOverlay('tasks',remoteD.tasks||[])}
+}
+function syncSource(key,source,rows,collectionName){
+ APP.sources[key]||={};APP.sources[key][source]=rows;
+ const all=Object.values(APP.sources[key]).flat(),map=new Map(all.map(x=>[x.id,x]));
+ const merged=[...map.values()];
+ if(key==='tasks'){
+  for(const old of remoteD.tasks||[])delete APP.remotePaths[old.id];
+  // Previously this assigned the most recent listener's collection to ALL
+  // merged tasks. That caused the same ID to be written to two collections.
+  for(const [listener,entries] of Object.entries(APP.sources.tasks)){
+   const physical=listener.startsWith('recurrenceInstances-')?'recurrenceInstances':'tasks';
+   for(const entry of entries){
+    const current=APP.remotePaths[entry.id];
+    if(!current||current===physical||physical==='recurrenceInstances'&&entry.seriesId)
+     APP.remotePaths[entry.id]=physical;
+   }
+  }
+  remoteD.tasks=copy(merged);D.tasks=applyPendingOverlay('tasks',merged);
+  reconcilePendingTaskPaths();
+ }else if(key==='permissions'){
+  D.permissions=rows[0]?.permissions||PERMS();remoteD.permissions=copy(D.permissions)
+ }else{
+  remoteD[key]=copy(merged);D[key]=applyPendingOverlay(key,merged)
+ }
+ if(key!=='tasks'&&collectionName)for(const x of merged)APP.remotePaths[x.id]=collectionName;
+ if(key==='users'&&!isAdmin()){
+  const mine=merged.find(x=>x.id===APP.user?.uid);
+  if(mine&&mine.status==='disabled'){
+   APP.status='disabled';APP.approved=false;APP.profile=mine;clearSubscriptions();
+   APP.loading=false;APP.loadingWorkspace=false;render()
+  }
+ }
+}
+function noteReadReady(name){
+ APP.readyReadSet||=new Set();
+ if(!APP.readyReadSet.has(name)){APP.readyReadSet.add(name);APP.readyReads=APP.readyReadSet.size}
+ if(APP.readsReady&&APP.readyReads>=APP.expectedReads){
+  const wasLoading=APP.loadingWorkspace;APP.loadingWorkspace=false;
+  if(wasLoading&&!APP.workspaceReadError)APP.syncError='';
+  if(wasLoading){reconcilePendingTaskPaths();render()}
+  if(wasLoading&&!APP.generationStarted&&!APP.workspaceReadError){
+   APP.generationStarted=true;const n=generateDue();
+   if(n||pendingOps.size)persist().catch(reportBackgroundSyncFailure)
+  }
+ }
+}
 function taskQueries(collectionName){const col=collection(db,collectionName),uid=APP.user.uid;if(isAdmin()){listenQuery('tasks',collectionName+'-team',query(col,where('visibility','==','team')),collectionName);if(isProjectControlsManager())listenQuery('tasks',collectionName+'-private',query(col,where('visibility','==','manager_private'),where('assigneeUid','==',uid)),collectionName)}else{listenQuery('tasks',collectionName+'-assigned',query(col,where('visibility','==','team'),where('assigneeUid','==',uid)),collectionName);listenQuery('tasks',collectionName+'-created',query(col,where('visibility','==','team'),where('createdByUid','==',uid)),collectionName)}}
 function toFirestore(key,value){const {id,...x}=value,p={...x};if(key==='users'){p.uid=id;p.projectIds=p.projects||[];delete p.projects;p.status=p.active?'active':'disabled';delete p.active}
  if(key==='requests'){p.uid=id;p.status=p.status||'pending';p.createdAt=p.createdAt||serverTimestamp();delete p.date}
@@ -292,17 +482,20 @@ function themeChooser(){
 }
 function installAppRow(){return pwaInstalled()?'':`<button class="more-menu-row" data-action="install-app"><span class="more-menu-icon">${icon('download',21)}</span><span class="more-menu-copy"><b>نصب اپلیکیشن</b><small>افزودن برنامه به صفحهٔ اصلی گوشی</small></span>${icon('back',18)}</button>`}
 function recoverySyncRow(){
- if(!pendingOps.size&&!APP.syncError)return '';
+ let conflicts=0;try{conflicts=JSON.parse(localStorage.getItem(conflictStoreKey())||'[]').length}catch{}
+ if(!pendingOps.size&&!APP.syncError&&!conflicts)return '';
  const text=pendingOps.size?`${num(pendingOps.size)} تغییر در انتظار ذخیره`:'بررسی اتصال به Firebase';
- return `<button class="more-menu-row" data-action="retry-sync"><span class="more-menu-icon">${icon('refresh',20)}</span><span class="more-menu-copy"><b>تلاش دوباره برای ذخیره آنلاین</b><small>${text}؛ تغییرها پاک نشده‌اند</small></span>${icon('back',18)}</button>
- <button class="more-menu-row" data-action="export-sync-report"><span class="more-menu-icon">${icon('file',20)}</span><span class="more-menu-copy"><b>دریافت گزارش خطای ذخیره</b><small>فقط مسیر، نوع عملیات و کد خطا؛ بدون متن وظایف یا رمز عبور</small></span>${icon('back',18)}</button>`;
+ return `${pendingOps.size||APP.syncError?`<button class="more-menu-row" data-action="retry-sync"><span class="more-menu-icon">${icon('refresh',20)}</span><span class="more-menu-copy"><b>تلاش دوباره برای ذخیره آنلاین</b><small>${text}؛ اطلاعات حذف نشده‌اند</small></span>${icon('back',18)}</button>
+ <button class="more-menu-row" data-action="export-sync-report"><span class="more-menu-icon">${icon('file',20)}</span><span class="more-menu-copy"><b>دریافت گزارش خطای ذخیره</b><small>مسیر، نوع عملیات و کد خطا؛ بدون رمز عبور</small></span>${icon('back',18)}</button>`:''}
+ <button class="more-menu-row" data-action="backup-sync-recovery"><span class="more-menu-icon">${icon('download',20)}</span><span class="more-menu-copy"><b>دریافت پشتیبان تغییرات و تعارض‌ها</b><small>فایل بازیابی برای بررسی موارد ذخیره‌نشده یا حذف‌شده در دستگاه دیگر</small></span>${icon('back',18)}</button>`;
 }
 function exportSyncReport(){
- const report={app:'PCH',clientVersion:'2026-11-22-v14',firebaseProject:firebaseConfig.projectId,
+ const report={app:'PCH',clientVersion:'2026-11-22-v15',firebaseProject:firebaseConfig.projectId,
   role:APP.role||'unknown',generatedAt:new Date().toISOString(),online:navigator.onLine,
-  pending:[...pendingOps.values()].map(op=>({collection:op.cname,documentId:op.id,kind:op.type,createOnly:!!op.createOnly,seriesId:op.value?.seriesId||null,status:op.value?.status||null})),
-  failures:lastWriteFailures,syncError:APP.syncError||null};
- download('pch-sync-diagnostics-v14.json',JSON.stringify(report,null,2),'application/json;charset=utf-8');
+  pending:[...pendingOps.values()].map(op=>({collection:op.cname,documentId:op.id,kind:op.type,createOnly:!!op.createOnly,seriesId:op.value?.seriesId||null,status:op.value?.status||null,knownCollections:op.key==='tasks'?knownTaskPaths(op.id):[],hasCreatedBy:typeof op.value?.createdBy==='string'||typeof op.value?.createdByUid==='string',hasAssignee:typeof op.value?.assignee==='string'||typeof op.value?.assigneeUid==='string'})),
+  archivedConflictCount:(()=>{try{return JSON.parse(localStorage.getItem(conflictStoreKey())||'[]').length}catch{return 0}})(),
+  readError:!!APP.workspaceReadError,failures:lastWriteFailures,syncError:APP.syncError||null};
+ download('pch-sync-diagnostics-v15.json',JSON.stringify(report,null,2),'application/json;charset=utf-8');
 }
 function adminMorePage(){const items=[
  ['mine','lock','کارهای شخصی من','فقط خود آقای وثوق به این فعالیت‌ها دسترسی دارد'],
@@ -481,14 +674,20 @@ function updateGrade(fd){const t=D.tasks.find(t=>t.id===U.edit);if(!t||!isAdmin(
 function download(name,data,mime){const u=URL.createObjectURL(new Blob([data],{type:mime}));const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1000)}
 const csv=rows=>'\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
 function backup(){download('pch-vosough-backup-'+toEn(jstr(isoToday())).replaceAll('/','-')+'.json',JSON.stringify(D,null,2),'application/json;charset=utf-8');toast('فایل پشتیبان دریافت شد.')}
+function backupSyncRecovery(){
+ const output={version:'v15',date:new Date().toISOString(),firebaseProject:firebaseConfig.projectId,
+  pending:[...pendingOps.values()],conflicts:JSON.parse(localStorage.getItem(conflictStoreKey())||'[]'),
+  originalPending:JSON.parse(localStorage.getItem(`pch-pre-v15-outbox:${APP.user?.uid}`)||'[]')};
+ download('pch-sync-recovery-'+Date.now()+'.json',JSON.stringify(output,null,2),'application/json;charset=utf-8');
+}
 function exportCsv(kind){let rows;if(kind==='csv-tasks')rows=[['عنوان','مسئول','پروژه','موعد شمسی','وضعیت','وزن','امتیاز'],...D.tasks.map(t=>[t.title,actorName(t.assignee),projectName(t.projectId),jstr(t.due),taskStatus(t),t.weight,taskScore(t)??''])];else if(kind==='csv-users')rows=[['نام','ایمیل','سمت','پروژه‌های مجاز','فعال'],...D.users.map(u=>[u.name,u.email,roles[u.role],u.projects.map(projectName).join('؛ '),u.active?'بله':'خیر'])];else rows=[['عنوان کار','نام نیرو','امتیاز','کیفیت','کامل بودن','زمان','تاریخ شمسی'],...D.evaluations.filter(e=>e.assignee!==MANAGER_ID&&!managerTask(D.tasks.find(t=>t.id===e.taskId))).map(e=>[D.tasks.find(t=>t.id===e.taskId)?.title||'فعالیت حذف‌شده',actorName(e.assignee),e.score,e.quality,e.complete,e.timing,jstr(e.date)])];download(kind+'-'+toEn(jstr(isoToday())).replaceAll('/','-')+'.csv',csv(rows),'text/csv;charset=utf-8')}
-function handleAction(act,el){const x=el?.dataset.id||'';switch(act){case'toggle-auth-mode':APP.authMode=APP.authMode==='signup'?'login':'signup';APP.authError='';render();break;case'google-auth':signInWithRedirect(auth,googleProvider).catch(e=>{APP.authError=authMessage(e);render()});break;case'sign-out':signOut(auth);break;case'set-palette':setPalette(x);break;case'set-theme-mode':setThemeMode(x);break;case'toggle-theme-mode':{const next=readTheme()==='dark'?'light':'dark';if(readPalette()!=='classic')setPalette('classic');setThemeMode(next);break}case'toggle-menu':U.mobileNav=!U.mobileNav;render();break;case'close-modal':closeModal();break;case'new-project':pushModal('project');break;case'edit-project':pushModal('project',x);break;case'new-task':pushModal('task');break;case'new-own-task':if(!isAdmin())return;U.page='mine';pushModal('task');break;case'edit-task':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('task',x);break;case'task-detail':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('details',x);break;case'new-request':case'new-user':return toast('عضویت فقط از فرم ثبت‌نام Firebase انجام می‌شود.',true);case'approve-user':pushModal('user',x);break;case'edit-user':pushModal('user',x);break;case'revoke-user':manageMember('revoke',x);break;case'remove-user':manageMember('remove',x);break;case'restore-user':manageMember('restore',x);break;case'export-sync-report':exportSyncReport();break;case'retry-sync':if(!APP.user||!APP.approved)return toast('برای همگام‌سازی باید با حساب فعال وارد شوی.',true);persist().then(()=>{if(!pendingOps.size)toast('تغییرات با Firebase ثبت شد.');}).catch(showSyncFailure);break;case'new-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است؛ برای ثبت برنامه از حساب فعال همان سمت وارد شوید.',true);pushModal('recurring');break;case'edit-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است.',true);pushModal('recurring',x);break;case'grade-task':if(isAdmin()&&!managerTask(D.tasks.find(t=>t.id===x)))pushModal('grade',x);break;case'person-detail':if(isAdmin())pushModal('person',x);break;case'back-admin':if(isAdmin())setPage('panels');break;case'install-app':installApplication();break;case'to-panels':setPage('panels');break;case'go-reviews':U.filterStatus='review';setPage('tasks');break;case'show-project-tasks':U.filterProject=x;setPage('tasks');break;case'clear-filter':U.filterProject='all';U.filterStatus='all';U.filterText='';render();break;case'open-role':openRole(x);break;case'refresh-log':render();break;case'calendar-prev':U.calendarOffset--;U.calendarSelect=null;render();break;case'calendar-next':U.calendarOffset++;U.calendarSelect=null;render();break;case'calendar-today':U.calendarOffset=0;U.calendarSelect=null;render();break;case'month-day':U.calendarSelect=x;render();break;case'perf-prev':U.monthShift--;render();break;case'perf-next':U.monthShift++;render();break;case'backup':backup();break;case'restore':return toast('بازیابی فایل محلی به Firebase برای جلوگیری از انتقال ناخواسته داده غیرفعال است.',true);case'print':window.print();break;case'csv-tasks':case'csv-users':case'csv-scores':exportCsv(act);break;
-case'delete-task':{if(!isAdmin())return toast('حذف فقط برای وثوق مجاز است.',true);const t=D.tasks.find(t=>t.id===x);if(!t)return;if(!confirm(`فعالیت «${t.title}» حذف شود؟\nاین کار از فهرست وظایف پاک می‌شود. سوابق مدیریتی حذف در تاریخچه باقی می‌ماند.`))return;record('delete','وثوق فعالیت «'+t.title+'» را حذف کرد',t.id);if(t.seriesId){const rr=D.recurrences.find(r=>r.id===t.seriesId);if(rr){rr.excluded||=[];rr.excluded.push(t.occurrenceKey)}}D.tasks=D.tasks.filter(q=>q.id!==t.id);if(U.modal)closeModal();save('فعالیت حذف شد.');break}
+function handleAction(act,el){const x=el?.dataset.id||'';switch(act){case'toggle-auth-mode':APP.authMode=APP.authMode==='signup'?'login':'signup';APP.authError='';render();break;case'google-auth':signInWithRedirect(auth,googleProvider).catch(e=>{APP.authError=authMessage(e);render()});break;case'sign-out':signOut(auth);break;case'set-palette':setPalette(x);break;case'set-theme-mode':setThemeMode(x);break;case'toggle-theme-mode':{const next=readTheme()==='dark'?'light':'dark';if(readPalette()!=='classic')setPalette('classic');setThemeMode(next);break}case'toggle-menu':U.mobileNav=!U.mobileNav;render();break;case'close-modal':closeModal();break;case'new-project':pushModal('project');break;case'edit-project':pushModal('project',x);break;case'new-task':pushModal('task');break;case'new-own-task':if(!isAdmin())return;U.page='mine';pushModal('task');break;case'edit-task':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('task',x);break;case'task-detail':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('details',x);break;case'new-request':case'new-user':return toast('عضویت فقط از فرم ثبت‌نام Firebase انجام می‌شود.',true);case'approve-user':pushModal('user',x);break;case'edit-user':pushModal('user',x);break;case'revoke-user':manageMember('revoke',x);break;case'remove-user':manageMember('remove',x);break;case'restore-user':manageMember('restore',x);break;case'export-sync-report':exportSyncReport();break;case'retry-sync':if(!APP.user||!APP.approved)return toast('برای همگام‌سازی باید با حساب فعال وارد شوی.',true);persist().then(()=>{if(!pendingOps.size)toast('تغییرات با Firebase ثبت شد.');}).catch(showSyncFailure);break;case'new-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است؛ برای ثبت برنامه از حساب فعال همان سمت وارد شوید.',true);pushModal('recurring');break;case'edit-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است.',true);pushModal('recurring',x);break;case'grade-task':if(isAdmin()&&!managerTask(D.tasks.find(t=>t.id===x)))pushModal('grade',x);break;case'person-detail':if(isAdmin())pushModal('person',x);break;case'back-admin':if(isAdmin())setPage('panels');break;case'install-app':installApplication();break;case'to-panels':setPage('panels');break;case'go-reviews':U.filterStatus='review';setPage('tasks');break;case'show-project-tasks':U.filterProject=x;setPage('tasks');break;case'clear-filter':U.filterProject='all';U.filterStatus='all';U.filterText='';render();break;case'open-role':openRole(x);break;case'refresh-log':render();break;case'calendar-prev':U.calendarOffset--;U.calendarSelect=null;render();break;case'calendar-next':U.calendarOffset++;U.calendarSelect=null;render();break;case'calendar-today':U.calendarOffset=0;U.calendarSelect=null;render();break;case'month-day':U.calendarSelect=x;render();break;case'perf-prev':U.monthShift--;render();break;case'perf-next':U.monthShift++;render();break;case'backup':backup();break;case'backup-sync-recovery':backupSyncRecovery();break;case'restore':return toast('بازیابی فایل محلی به Firebase برای جلوگیری از انتقال ناخواسته داده غیرفعال است.',true);case'print':window.print();break;case'csv-tasks':case'csv-users':case'csv-scores':exportCsv(act);break;
+case'delete-task':{if(!isAdmin())return toast('حذف فقط برای وثوق مجاز است.',true);const t=D.tasks.find(t=>t.id===x);if(!t)return;if(!confirm(`فعالیت «${t.title}» حذف شود؟\nاین کار از فهرست وظایف پاک می‌شود. سوابق مدیریتی حذف در تاریخچه باقی می‌ماند.`))return;record('delete','وثوق فعالیت «'+t.title+'» را حذف کرد',t.id);if(t.seriesId){const rr=D.recurrences.find(r=>r.id===t.seriesId);if(rr){rr.excluded||=[];rr.excluded.push(t.occurrenceKey)}}queueExplicitDelete('tasks',t);D.tasks=D.tasks.filter(q=>q.id!==t.id);if(U.modal)closeModal();save('درخواست حذف برای ذخیره آنلاین ارسال شد.');break}
 case'delete-project':{if(!isAdmin())return;const p=proj(x);if(!p)return;const attached=D.tasks.filter(t=>t.projectId===x).length;if(!confirm(`پروژه «${p.name}» حذف شود؟\n${num(attached)} وظیفه موجود به «بدون پروژه» منتقل می‌شوند و خود وظایف حذف نخواهند شد.`))return;D.projects=D.projects.filter(q=>q.id!==x);D.tasks.forEach(t=>{if(t.projectId===x)t.projectId=''});D.recurrences.forEach(r=>{if(r.projectId===x)r.projectId=''});D.users.forEach(u=>u.projects=u.projects.filter(k=>k!==x));record('delete','حذف پروژه '+p.name,x);save('پروژه حذف شد؛ وظایف حفظ شدند.');break}
 case'reject-user':{if(!isAdmin())return;const r=D.requests.find(q=>q.id===x);if(r&&confirm(`درخواست ${r.name} رد شود؟`)){r.status='rejected';r.reviewedByUid=APP.user.uid;r.reviewedAt=new Date().toISOString();record('user','رد درخواست '+r.email);save('درخواست رد شد.')}break}
 case'approve-recurring':{if(!isAdmin())return;const r=D.recurrences.find(z=>z.id===x);if(!r)return;r.state='active';record('edit','تأیید برنامه تکراری '+r.title,r.id);generateDue();save('برنامه تأیید شد و نوبت‌های موعدرسیده ایجاد شدند.');break}
 case'toggle-recurring':{if(!isAdmin())return;const r=D.recurrences.find(z=>z.id===x);if(!r)return;r.state=r.state==='active'?'paused':'active';record('edit',r.state==='paused'?'توقف برنامه':'فعال‌سازی برنامه',r.id);if(r.state==='active')generateDue();save('وضعیت تکرار تغییر کرد.');break}
-case'delete-recurring':{if(!isAdmin())return;const r=D.recurrences.find(z=>z.id===x);if(!r)return;if(!confirm(`برنامه تکراری «${r.title}» حذف شود؟\nنوبت‌های قبلی و امتیازهای آن‌ها باقی می‌مانند؛ فقط تکرارهای آینده حذف می‌شوند.`))return;D.recurrences=D.recurrences.filter(z=>z.id!==x);record('delete','حذف برنامه تکراری '+r.title,r.id);save('برنامه حذف شد، سوابق نوبت‌ها محفوظ هستند.');break}
+case'delete-recurring':{if(!isAdmin())return;const r=D.recurrences.find(z=>z.id===x);if(!r)return;if(!confirm(`برنامه تکراری «${r.title}» حذف شود؟\nنوبت‌های قبلی و امتیازهای آن‌ها باقی می‌مانند؛ فقط تکرارهای آینده حذف می‌شوند.`))return;queueExplicitDelete('recurrences',r);D.recurrences=D.recurrences.filter(z=>z.id!==x);record('delete','حذف برنامه تکراری '+r.title,r.id);save('برنامه حذف شد، سوابق نوبت‌ها محفوظ هستند.');break}
 case'recurring-instance':{const r=D.recurrences.find(z=>z.id===x);if(!r||r.state!=='active'||!(isAdmin()||(!managerRecurring(r)&&r.assignee===U.actor)))return toast('امکان ثبت نوبت وجود ندارد.',true);const t=createInstance(r,isoToday(),true);if(t){save('نوبت جدید ایجاد شد.');if(!isAdmin())U.roleTab='tasks';render()}break}
 case'reset-all':return toast('پاک‌سازی گروهی داده‌های Firebase از داخل اپ غیرفعال است.',true);}}
 const modalForms=new Set(['form-task','form-project','form-request','form-user','form-recurring','form-grade','form-note']);
