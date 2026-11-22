@@ -136,7 +136,20 @@ function stageOperation(op){op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.c
 function applyRemoteOperation(op){const list=remoteD[op.key]||[],ix=list.findIndex(x=>x.id===op.id);if(op.type==='delete'){if(ix>=0)list.splice(ix,1)}else if(ix>=0)list[ix]=copy(op.value);else list.push(copy(op.value));remoteD[op.key]=list}
 function firestorePayload(op){const model=op.cname==='recurrenceInstances'?'instances':({projects:'projects',users:'users',membershipRequests:'requests',activityHistory:'events',recurrences:'recurrences',evaluations:'evaluations'}[op.cname]||'tasks');return toFirestore(model,op.value)}
 async function writeOne(op){const ref=doc(db,op.cname,op.id);if(op.type==='delete'){await deleteDoc(ref);return}if(op.cname==='recurrenceInstances'&&op.createOnly){await runTransaction(db,async tx=>{const existing=await tx.get(ref);if(!existing.exists())tx.set(ref,firestorePayload(op))});return}await setDoc(ref,firestorePayload(op))}
-async function flushPendingOps(){const list=[...pendingOps.values()];const failed=[];let cursor=0;const worker=async()=>{while(cursor<list.length){const op=list[cursor++];try{await writeOne(op);const current=pendingOps.get(pendingOpKey(op.cname,op.id));if(current?.rev===op.rev){pendingOps.delete(pendingOpKey(op.cname,op.id));applyRemoteOperation(op)}}catch(error){failed.push({op,error})}}};await Promise.all(Array.from({length:Math.min(6,list.length)},worker));persistPendingOps();if(failed.length){const first=failed[0].error,code=first?.code||first?.name||'unknown';const err=new Error(`${failed.length} مورد از ${list.length} تغییر ذخیره نشد. کد Firebase: ${code} — ${first?.message||'علت نامشخص'}`);err.code=code;err.failures=failed;throw err}APP.syncError='';return true}
+function syncWritePhase(op){if(op.cname==='recurrenceInstances')return 1;if(op.cname==='evaluations')return 2;if(op.cname==='activityHistory')return 3;return 0}
+function syncWriteLabel(op){const names={recurrences:'برنامه تکراری',recurrenceInstances:'نوبت تکراری',evaluations:'ارزیابی',activityHistory:'گزارش فعالیت',tasks:'فعالیت',projects:'پروژه',users:'کاربر',membershipRequests:'درخواست عضویت'};return (names[op.cname]||op.cname)+' · '+String(op.id||'').slice(-6)}
+async function flushPendingOps(){
+const list=[...pendingOps.values()].sort((a,b)=>syncWritePhase(a)-syncWritePhase(b)),failed=[],failedKeys=new Set();
+for(let phase=0;phase<=3;phase++){let cursor=0;const phaseOps=list.filter(op=>syncWritePhase(op)===phase);
+const worker=async()=>{while(cursor<phaseOps.length){const op=phaseOps[cursor++],key=pendingOpKey(op.cname,op.id);let pre=null;
+if(op.cname==='recurrenceInstances')pre=pendingOpKey('recurrences',op.value.seriesId);
+if(op.cname==='evaluations'){const linked=list.find(x=>x.id===op.value.taskId&&(x.cname==='tasks'||x.cname==='recurrenceInstances'));if(linked)pre=pendingOpKey(linked.cname,linked.id)}
+if(pre&&failedKeys.has(pre)){const error=new Error('ذخیره پیش‌نیاز ناموفق بود؛ این مورد برای جلوگیری از ثبت ناسازگار در صف ماند.');error.code='dependency-failed';failed.push({op,error});failedKeys.add(key);continue}
+try{await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);applyRemoteOperation(op)}}catch(error){failed.push({op,error});failedKeys.add(key)}}};
+await Promise.all(Array.from({length:Math.min(6,phaseOps.length)},worker))}
+persistPendingOps();
+if(failed.length){const first=failed[0].error,code=first.code||first.name||'unknown';const err=new Error(failed.length+' مورد از '+list.length+' تغییر ذخیره نشد؛ '+syncWriteLabel(failed[0].op)+'. کد Firebase: '+code+' — '+(first.message||'علت نامشخص'));err.code=code;err.failures=failed;throw err}
+APP.syncError='';return true}
 function persist(){
  if(!APP.user||!APP.approved||APP.readOnlyPreview)return Promise.reject(new Error('حساب فعال برای نوشتن لازم است.'));
  const snapshot=copy(D);APP.pendingWrites++;APP.syncError='';
