@@ -142,8 +142,8 @@ async function flushPendingOps(){
 const list=[...pendingOps.values()].sort((a,b)=>syncWritePhase(a)-syncWritePhase(b)),failed=[],failedKeys=new Set();
 for(let phase=0;phase<=3;phase++){let cursor=0;const phaseOps=list.filter(op=>syncWritePhase(op)===phase);
 const worker=async()=>{while(cursor<phaseOps.length){const op=phaseOps[cursor++],key=pendingOpKey(op.cname,op.id);let pre=null;
-if(op.cname==='recurrenceInstances')pre=pendingOpKey('recurrences',op.value.seriesId);
-if(op.cname==='evaluations'){const linked=list.find(x=>x.id===op.value.taskId&&(x.cname==='tasks'||x.cname==='recurrenceInstances'));if(linked)pre=pendingOpKey(linked.cname,linked.id)}
+if(op.cname==='recurrenceInstances'&&op.type!=='delete'&&op.value?.seriesId)pre=pendingOpKey('recurrences',op.value.seriesId);
+if(op.cname==='evaluations'&&op.type!=='delete'&&op.value?.taskId){const linked=list.find(x=>x.id===op.value.taskId&&(x.cname==='tasks'||x.cname==='recurrenceInstances'));if(linked)pre=pendingOpKey(linked.cname,linked.id)}
 if(pre&&failedKeys.has(pre)){const error=new Error('ذخیره پیش‌نیاز ناموفق بود؛ این مورد برای جلوگیری از ثبت ناسازگار در صف ماند.');error.code='dependency-failed';failed.push({op,error});failedKeys.add(key);continue}
 try{await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);applyRemoteOperation(op)}}catch(error){failed.push({op,error});failedKeys.add(key)}}};
 await Promise.all(Array.from({length:Math.min(6,phaseOps.length)},worker))}
