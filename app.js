@@ -1,7 +1,7 @@
 'use strict';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signInWithRedirect, GoogleAuthProvider, signOut, updateProfile, reload } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-auth.js';
-import { getFirestore, doc, collection, getDoc, onSnapshot, query, where, setDoc, deleteDoc, writeBatch, runTransaction, serverTimestamp } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js';
+import { getFirestore, doc, collection, getDoc, onSnapshot, query, where, setDoc, deleteDoc, writeBatch, runTransaction, updateDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js';
 const firebaseConfig = {apiKey:'AIzaSyB33B6zHMBbQyfvRlo9M_AkuXJV8_votME',authDomain:'project-controls-hub-8bb30.firebaseapp.com',projectId:'project-controls-hub-8bb30',storageBucket:'project-controls-hub-8bb30.firebasestorage.app',messagingSenderId:'867802858246',appId:'1:867802858246:web:5715422679339e5934d487'};
 const firebaseApp=initializeApp(firebaseConfig),auth=getAuth(firebaseApp),db=getFirestore(firebaseApp),googleProvider=new GoogleAuthProvider();
 const copy=x=>JSON.parse(JSON.stringify(x));
@@ -134,8 +134,40 @@ function applyPendingOverlay(key,rows){const map=new Map(rows.map(x=>[x.id,copy(
 const collectionFor=(key,value,docId)=>key==='tasks'?(APP.remotePaths[docId]||(value?.seriesId?'recurrenceInstances':'tasks')):KEY_TO_COLLECTION[key];
 function stageOperation(op){op.rev=++pendingSeq;pendingOps.set(pendingOpKey(op.cname,op.id),op)}
 function applyRemoteOperation(op){const list=remoteD[op.key]||[],ix=list.findIndex(x=>x.id===op.id);if(op.type==='delete'){if(ix>=0)list.splice(ix,1)}else if(ix>=0)list[ix]=copy(op.value);else list.push(copy(op.value));remoteD[op.key]=list}
-function firestorePayload(op){const model=op.cname==='recurrenceInstances'?'instances':({projects:'projects',users:'users',membershipRequests:'requests',activityHistory:'events',recurrences:'recurrences',evaluations:'evaluations'}[op.cname]||'tasks');const value=copy(op.value);if(op.cname==='recurrenceInstances'&&op.createOnly&&isSystemOwner()&&!isProjectControlsManager())value.weight=0;return toFirestore(model,value)}
-async function writeOne(op){const ref=doc(db,op.cname,op.id);if(op.type==='delete'){await deleteDoc(ref);return}if(op.cname==='recurrenceInstances'&&op.createOnly){await runTransaction(db,async tx=>{const existing=await tx.get(ref);if(!existing.exists())tx.set(ref,firestorePayload(op))});return}await setDoc(ref,firestorePayload(op))}
+function firestorePayload(op){
+ const model=op.cname==='recurrenceInstances'?'instances':({projects:'projects',users:'users',membershipRequests:'requests',activityHistory:'events',recurrences:'recurrences',evaluations:'evaluations'}[op.cname]||'tasks');
+ // Normalize old unsent occurrences from the persistent outbox. Their former
+ // default weight (3) was not necessarily the template's actual weight (0).
+ if(op.cname==='recurrenceInstances'&&op.createOnly&&op.value?.seriesId){
+  const source=D.recurrences.find(r=>r.id===op.value.seriesId);
+  if(source)op.value.weight=managerRecurring(source)?0:(source.weight??0);
+ }
+ return toFirestore(model,op.value);
+}
+// Staff only patches their editable fields; replacing the complete document would erase
+// the manager-controlled weight and violate Firestore's immutable-weight constraint.
+const STAFF_EDITABLE_FIELDS=['title','projectId','due','priority','description','status','blockReason','notes','submittedAt','updatedAt'];
+async function writeOne(op){
+ const ref=doc(db,op.cname,op.id);
+ if(op.type==='delete'){await deleteDoc(ref);return}
+ if(op.cname==='recurrenceInstances'&&op.createOnly){
+  await runTransaction(db,async tx=>{const existing=await tx.get(ref);if(!existing.exists())tx.set(ref,firestorePayload(op))});return
+ }
+ if(!isAdmin()&&(op.cname==='tasks'||op.cname==='recurrenceInstances')){
+  const prior=(remoteD.tasks||[]).find(x=>x.id===op.id);
+  if(prior){
+   const model=op.cname==='recurrenceInstances'?'instances':'tasks';
+   const oldPayload=toFirestore(model,prior),newPayload=firestorePayload(op),patch={};
+   for(const field of STAFF_EDITABLE_FIELDS){
+    if(Object.prototype.hasOwnProperty.call(newPayload,field)&&
+       JSON.stringify(oldPayload[field])!==JSON.stringify(newPayload[field]))patch[field]=newPayload[field];
+   }
+   if(Object.keys(patch).length)await updateDoc(ref,patch);
+   return;
+  }
+ }
+ await setDoc(ref,firestorePayload(op));
+}
 function syncWritePhase(op){if(op.cname==='recurrenceInstances')return 1;if(op.cname==='evaluations')return 2;if(op.cname==='activityHistory')return 3;return 0}
 function syncWriteLabel(op){const names={recurrences:'برنامه تکراری',recurrenceInstances:'نوبت تکراری',evaluations:'ارزیابی',activityHistory:'گزارش فعالیت',tasks:'فعالیت',projects:'پروژه',users:'کاربر',membershipRequests:'درخواست عضویت'};return (names[op.cname]||op.cname)+' · '+String(op.id||'').slice(-6)}
 async function flushPendingOps(){
@@ -170,7 +202,7 @@ function startWorkspace(){clearSubscriptions();loadPendingOps();APP.loadingWorks
  if(admin)listenQuery('requests','requests',query(collection(db,'membershipRequests'),where('status','==','pending')),'membershipRequests');else listenDocument('requests','request-self',doc(db,'membershipRequests',uid),'membershipRequests');
  taskQueries('tasks');taskQueries('recurrenceInstances');
  if(admin){listenQuery('recurrences','recurrences-team',query(collection(db,'recurrences'),where('visibility','==','team')),'recurrences');if(isProjectControlsManager())listenQuery('recurrences','recurrences-private',query(collection(db,'recurrences'),where('visibility','==','manager_private'),where('assigneeUid','==',uid)),'recurrences');listenQuery('evaluations','evaluations',collection(db,'evaluations'),'evaluations')}
- else{listenQuery('recurrences','recurrences-assigned',query(collection(db,'recurrences'),where('assigneeUid','==',uid)),'recurrences');listenQuery('recurrences','recurrences-created',query(collection(db,'recurrences'),where('createdByUid','==',uid)),'recurrences')}
+ else{listenQuery('recurrences','recurrences-assigned',query(collection(db,'recurrences'),where('visibility','==','team'),where('assigneeUid','==',uid)),'recurrences');listenQuery('recurrences','recurrences-created',query(collection(db,'recurrences'),where('visibility','==','team'),where('createdByUid','==',uid)),'recurrences')}
  const hist=collection(db,'activityHistory');if(admin){listenQuery('events','history-team',query(hist,where('visibility','==','team')),'activityHistory');if(isProjectControlsManager())listenQuery('events','history-private',query(hist,where('visibility','==','manager_private'),where('ownerUid','==',uid)),'activityHistory')}
  APP.expectedReads=APP.subscriptions.length;APP.readsReady=true;if(APP.expectedReads===0){APP.loadingWorkspace=false;render()}}
 function clearSubscriptions(){for(const stop of APP.subscriptions){try{stop()}catch{}}APP.subscriptions=[];APP.sources={};APP.remotePaths={};APP.expectedReads=0;APP.readyReads=0;APP.readyReadSet=new Set();APP.readsReady=false;APP.generationStarted=false;D=blank();remoteD=blank()}
@@ -178,10 +210,10 @@ function listenQuery(key,source,ref,collectionName){APP.expectedReads++;const un
 function listenDocument(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,snap=>{syncSource(key,source,snap.exists()?[normalizeDocument(key,snap)]:[],collectionName);noteReadReady(source)},err=>{APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
 function syncSource(key,source,rows,collectionName){APP.sources[key]||={};APP.sources[key][source]=rows;const all=Object.values(APP.sources[key]).flat(),map=new Map(all.map(x=>[x.id,x]));const merged=[...map.values()];if(key==='tasks'){remoteD.tasks=copy(merged);D.tasks=applyPendingOverlay('tasks',merged);for(const r of merged)APP.remotePaths[r.id]=r.seriesId?'recurrenceInstances':'tasks'}else if(key==='permissions'){D.permissions=rows[0]?.permissions||PERMS();remoteD.permissions=copy(D.permissions)}else{remoteD[key]=copy(merged);D[key]=applyPendingOverlay(key,merged)}for(const x of merged)if(collectionName)APP.remotePaths[x.id]=collectionName;if(key==='users'&&!isAdmin()){const mine=merged.find(x=>x.id===APP.user?.uid);if(mine&&mine.status==='disabled'){APP.status='disabled';APP.approved=false;APP.profile=mine;clearSubscriptions();APP.loading=false;APP.loadingWorkspace=false;render()}}}
 function noteReadReady(name){APP.readyReadSet||=new Set();if(!APP.readyReadSet.has(name)){APP.readyReadSet.add(name);APP.readyReads=APP.readyReadSet.size}if(APP.readsReady&&APP.readyReads>=APP.expectedReads){const wasLoading=APP.loadingWorkspace;APP.loadingWorkspace=false;if(wasLoading)APP.syncError='';render();if(wasLoading&&!APP.generationStarted){APP.generationStarted=true;const n=generateDue();if(n)persist().then(()=>toast(`${num(n)} نوبت سررسیدشده به‌صورت مستقل ثبت شد.`)).catch(showSyncFailure);else if(pendingOps.size)persist().catch(showSyncFailure)}}}
-function taskQueries(collectionName){const col=collection(db,collectionName),uid=APP.user.uid;if(isAdmin()){listenQuery('tasks',collectionName+'-team',query(col,where('visibility','==','team')),collectionName);if(isProjectControlsManager())listenQuery('tasks',collectionName+'-private',query(col,where('visibility','==','manager_private'),where('assigneeUid','==',uid)),collectionName)}else{listenQuery('tasks',collectionName+'-assigned',query(col,where('assigneeUid','==',uid)),collectionName);listenQuery('tasks',collectionName+'-created',query(col,where('createdByUid','==',uid)),collectionName)}}
+function taskQueries(collectionName){const col=collection(db,collectionName),uid=APP.user.uid;if(isAdmin()){listenQuery('tasks',collectionName+'-team',query(col,where('visibility','==','team')),collectionName);if(isProjectControlsManager())listenQuery('tasks',collectionName+'-private',query(col,where('visibility','==','manager_private'),where('assigneeUid','==',uid)),collectionName)}else{listenQuery('tasks',collectionName+'-assigned',query(col,where('visibility','==','team'),where('assigneeUid','==',uid)),collectionName);listenQuery('tasks',collectionName+'-created',query(col,where('visibility','==','team'),where('createdByUid','==',uid)),collectionName)}}
 function toFirestore(key,value){const {id,...x}=value,p={...x};if(key==='users'){p.uid=id;p.projectIds=p.projects||[];delete p.projects;p.status=p.active?'active':'disabled';delete p.active}
  if(key==='requests'){p.uid=id;p.status=p.status||'pending';p.createdAt=p.createdAt||serverTimestamp();delete p.date}
- if(key==='tasks'||key==='instances'){p.assigneeUid=p.assignee||p.assigneeUid;p.createdByUid=p.createdBy||p.createdByUid;delete p.assignee;delete p.createdBy;if(!isProjectControlsManager()&&!isSystemOwner())delete p.weight;if(!p.visibility)p.visibility='team'}
+ if(key==='tasks'||key==='instances'){p.assigneeUid=p.assignee||p.assigneeUid;p.createdByUid=p.createdBy||p.createdByUid;delete p.assignee;delete p.createdBy;if(key==='tasks'&&!isProjectControlsManager()&&!isSystemOwner())delete p.weight;if(!p.visibility)p.visibility='team'}
  if(key==='recurrences'){p.assigneeUid=p.assignee||p.assigneeUid;p.createdByUid=p.createdBy||p.createdByUid;delete p.assignee;delete p.createdBy;if(!isProjectControlsManager()&&!isSystemOwner())delete p.weight;if(!p.visibility)p.visibility='team'}
  if(key==='evaluations'){p.assigneeUid=p.assignee||p.assigneeUid;delete p.assignee}
  if(key==='events'){p.actorUid=p.actorUid||APP.user?.uid;p.by=p.by||actorName(APP.user?.uid)}
@@ -352,7 +384,7 @@ function rShould(r,iso){
  }
  return false
 }
-function createInstance(r,iso,manual=false){const k=manual?'manual:'+id('x'):iso;if(D.tasks.some(t=>t.seriesId===r.id&&t.occurrenceKey===k)||(r.excluded||[]).includes(k))return null;const t={id:manual?id('t'):`occ_${r.id}_${iso}`,title:r.title,projectId:r.projectId||'',assignee:r.assignee,createdBy:APP.user.uid,createdAt:isoToday(),updatedAt:new Date().toISOString(),due:iso,priority:'normal',weight:managerRecurring(r)?0:(r.weight||3),visibility:managerRecurring(r)?'manager_private':'team',status:'todo',description:r.description||'',notes:[],seriesId:r.id,occurrenceKey:k,submittedAt:null,evalId:null};D.tasks.push(t);record('new','ایجاد نوبت تکراری: '+t.title,t.id);return t}
+function createInstance(r,iso,manual=false){const k=manual?'manual:'+id('x'):iso;if(D.tasks.some(t=>t.seriesId===r.id&&t.occurrenceKey===k)||(r.excluded||[]).includes(k))return null;const t={id:manual?id('t'):`occ_${r.id}_${iso}`,title:r.title,projectId:r.projectId||'',assignee:r.assignee,createdBy:APP.user.uid,createdAt:isoToday(),updatedAt:new Date().toISOString(),due:iso,priority:'normal',weight:managerRecurring(r)?0:(r.weight??0),visibility:managerRecurring(r)?'manager_private':'team',status:'todo',description:r.description||'',notes:[],seriesId:r.id,occurrenceKey:k,submittedAt:null,evalId:null};D.tasks.push(t);record('new','ایجاد نوبت تکراری: '+t.title,t.id);return t}
 function generateDue(){let created=0,today=isoToday();for(const r of D.recurrences){if(r.state!=='active'||(!isAdmin()&&r.assignee!==APP.user?.uid)||(managerRecurring(r)&&!isProjectControlsManager()))continue;let cur=r.start,finish=r.end&&r.end<today?r.end:today;while(cur<=finish){if(rShould(r,cur)){const res=createInstance(r,cur);if(res)created++}cur=addDays(cur,1)}}return created}
 function setPage(page){if(!isAdmin())return;U.preview=null;U.actor=APP.user?.uid||null;APP.readOnlyPreview=false;U.page=page;U.mobileNav=false;U.modal=null;U.edit=null;render();window.scrollTo(0,0)}
 function openRole(role){if(!isAdmin()||!roles[role])return;U.preview=role;U.actor=APP.user.uid;U.roleTab='home';U.modal=null;U.mobileNav=false;APP.readOnlyPreview=true;render();window.scrollTo(0,0)}
@@ -387,7 +419,7 @@ function updateRecurring(fd){
  else{const obj={id:id('rr'),...v,state:isAdmin()?'active':'pending',createdBy:APP.user.uid,excluded:[]};D.recurrences.push(obj);record('new','ثبت برنامه تکراری '+title,obj.id)}
  closeModal();if(!isAdmin())U.roleTab='recurring';generateDue();save(r?'برنامه ویرایش شد.':isAdmin()?'برنامه تکراری ایجاد شد.':'درخواست برنامه به وثوق ارسال شد.')
 }
-function updateGrade(fd){const t=D.tasks.find(t=>t.id===U.edit);if(!t||!isAdmin()||managerTask(t))return toast('کارهای شخصی مدیر کنترل پروژه مشمول ارزیابی نیستند.',true);const delivered=jparse(fd.get('deliveredJ'));if(!delivered)return toast('تاریخ تحویل شمسی معتبر نیست.',true);const qual=Math.max(1,Math.min(5,+fd.get('quality'))),complete=Math.max(1,Math.min(5,+fd.get('complete'))),excused=fd.has('excused');const late=Math.max(0,Math.round((Date.parse(delivered+'T12:00:00Z')-Date.parse(t.due+'T12:00:00Z'))/86400000));const timing=excused?100:Math.max(0,100-late*15);const score=Math.round(qual*10+complete*4+timing*.3);const workWeight=Math.max(1,+t.weight||1);const ev={id:id('ev'),taskId:t.id,weight:workWeight,assignee:t.assignee,projectId:t.projectId,quality:qual,complete,timing,score,excused,deliveredAt:delivered,date:isoToday(),at:new Date().toISOString(),feedback:String(fd.get('feedback')||''),previousId:t.evalId||null};D.evaluations.push(ev);t.evalId=ev.id;t.status='done';t.submittedAt=delivered;t.updatedAt=new Date().toISOString();record('grade','وثوق امتیاز '+score+' از ۱۰۰ را ثبت کرد',t.id);closeModal();save(`امتیاز ${num(score)} از ۱۰۰ ثبت شد.`)}
+function updateGrade(fd){const t=D.tasks.find(t=>t.id===U.edit);if(!t||!isAdmin()||managerTask(t))return toast('کارهای شخصی مدیر کنترل پروژه مشمول ارزیابی نیستند.',true);const delivered=jparse(fd.get('deliveredJ'));if(!delivered)return toast('تاریخ تحویل شمسی معتبر نیست.',true);const qual=Math.max(1,Math.min(5,+fd.get('quality'))),complete=Math.max(1,Math.min(5,+fd.get('complete'))),excused=fd.has('excused');const late=Math.max(0,Math.round((Date.parse(delivered+'T12:00:00Z')-Date.parse(t.due+'T12:00:00Z'))/86400000));const timing=excused?100:Math.max(0,100-late*15);const score=Math.round(qual*10+complete*4+timing*.3);const workWeight=Math.max(1,+t.weight||1);const ev={id:id('ev'),taskId:t.id,weight:workWeight,assignee:t.assignee,projectId:t.projectId,quality:qual,complete,timing,score,excused,deliveredAt:delivered,date:isoToday(),at:new Date().toISOString(),feedback:String(fd.get('feedback')||''),previousId:t.evalId||null};D.evaluations.push(ev);t.evalId=ev.id;t.status='done';t.submittedAt=delivered;t.updatedAt=new Date().toISOString();/* امتیاز فقط در evaluations (قابل‌خواندن برای مدیر) ثبت می‌شود؛ در تاریخچه عمومی افشا نشود. */closeModal();save(`امتیاز ${num(score)} از ۱۰۰ ثبت شد.`)}
 function download(name,data,mime){const u=URL.createObjectURL(new Blob([data],{type:mime}));const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1000)}
 const csv=rows=>'\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
 function backup(){download('pch-vosough-backup-'+toEn(jstr(isoToday())).replaceAll('/','-')+'.json',JSON.stringify(D,null,2),'application/json;charset=utf-8');toast('فایل پشتیبان دریافت شد.')}
