@@ -1,0 +1,9 @@
+Project Controls Hub — به‌روزرسانی داشبورد
+
+این بسته شامل دو فایل جایگزین برای ریشه مخزن GitHub است:
+- app.js
+- index.html
+
+هر دو فایل را در صفحه اصلی مخزن project-controls-hub بارگذاری کن و گزینه Replace files را بزن. سپس تغییرات را با پیام مثلا "Simplify manager dashboard and add theme toggle" روی شاخه main ثبت کن.
+
+بعد از سبزشدن GitHub Pages، صفحه را روی گوشی دوباره باز کن. اگر نسخه قدیمی ماند، صفحه را یک‌بار کامل ببند و دوباره باز کن.
