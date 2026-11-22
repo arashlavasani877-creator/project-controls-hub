@@ -11,9 +11,7 @@ A Persian RTL, mobile-friendly project-controls workspace. The existing GitHub P
 
 ## Admin bootstrap
 
-The two designated administrator addresses are recognized only after Firebase confirms the account email. On the first verified sign-in, the app creates `adminAccess/{uid}` with the matching role. Firestore rules permit this one-time self-creation only when the verified token email exactly matches one of the two configured addresses; the UID, email, role, active flag, and allowed fields are checked server-side. No administrator password or service-account key is stored in the repository.
-
-All other verified accounts create a pending membership request and receive no project or evaluation data until an administrator approves them and assigns a staff role and allowed project IDs.
+Google sign-in is enabled so users do not receive a separate email-verification message. Google confirms the identity; the two designated administrator addresses receive the matching role only on a verified Google sign-in, with `adminAccess/{uid}` bound to that UID. Firestore rules allow this one-time self-creation only when the verified token email exactly matches one of the two configured addresses. Email/password sign-up also sends no verification email and creates a pending membership request immediately. Staff requests receive no project or evaluation data until an administrator approves the UID and assigns a staff role and allowed project IDs. No administrator password or service-account key is stored in the repository.
 
 ## Collections
 
@@ -27,7 +25,7 @@ The project owner can still inspect or modify the database through Firebase Cons
 
 ## Hosting
 
-GitHub Pages continues serving the static app for free. Authentication and Firestore traffic run directly from the browser using the Firebase Web SDK; Firebase Hosting and Blaze are not required. Add `arashlavasani877-creator.github.io` under Firebase Authentication → Settings → Authorized domains.
+GitHub Pages continues serving the static app for free. Authentication and Firestore traffic run directly from the browser using the Firebase Web SDK; Firebase Hosting and Blaze are not required. `arashlavasani877-creator.github.io` is authorized under Firebase Authentication → Settings → Authorized domains for OAuth redirects.
 
 ## Local development
 
