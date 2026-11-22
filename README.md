@@ -9,19 +9,11 @@ A Persian RTL, mobile-friendly project-controls workspace. The existing GitHub P
 - Firebase Web App ID: `1:867802858246:web:5715422679339e5934d487`
 - App configuration is public client configuration only; no passwords or service-account keys are stored here.
 
-## Admin bootstrap (required once)
+## Admin bootstrap
 
-No email address automatically grants an administrator role. For each of the two designated managers:
+The two designated administrator addresses are recognized only after Firebase confirms the account email. On the first verified sign-in, the app creates `adminAccess/{uid}` with the matching role. Firestore rules permit this one-time self-creation only when the verified token email exactly matches one of the two configured addresses; the UID, email, role, active flag, and allowed fields are checked server-side. No administrator password or service-account key is stored in the repository.
 
-1. Register through the app, verify the email, then sign in once.
-2. In Firebase Console → Authentication → Users, copy that account's UID.
-3. In Firestore, create `adminAccess/{UID}` with fields:
-   - `active`: `true` (boolean)
-   - `role`: `systemOwner` for the owner, or `projectControlsManager` for Mr. Vosough
-   - `name`: a display name
-4. Reload the app. Ordinary members must be approved by an active administrator and assigned a staff role and allowed project IDs.
-
-Do not create `adminAccess` documents by email. Firestore rules deliberately prohibit all client writes to that collection; trusted project owners must bootstrap these UID documents in the Firebase Console. No administrator password is included in this repository.
+All other verified accounts create a pending membership request and receive no project or evaluation data until an administrator approves them and assigns a staff role and allowed project IDs.
 
 ## Collections
 
