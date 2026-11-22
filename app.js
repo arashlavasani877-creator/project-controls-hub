@@ -125,7 +125,7 @@ async function handleAuthUser(user,version){
 function authMessage(e){const c=e?.code||'';return ({'auth/invalid-credential':'ایمیل یا رمز عبور درست نیست.','auth/operation-not-allowed':'ورود با Google هنوز در Firebase فعال نشده است.','auth/email-already-in-use':'برای این ایمیل قبلاً حساب ساخته شده است.','auth/weak-password':'رمز عبور باید حداقل ۸ نویسه باشد.','auth/invalid-email':'نشانی ایمیل معتبر نیست.','auth/too-many-requests':'تلاش‌های ورود زیاد بوده؛ کمی بعد دوباره امتحان کن.','auth/network-request-failed':'اتصال اینترنت برقرار نیست.','permission-denied':'قواعد امنیتی Firebase اجازهٔ این عملیات را نداد.'})[c]||e?.message||'عملیات انجام نشد.'}
 async function authSubmit(form){APP.authError='';const fd=new FormData(form),email=String(fd.get('email')||'').trim().toLowerCase(),password=String(fd.get('password')||'');try{if(APP.authMode==='signup'){const name=String(fd.get('name')||'').trim();if(!name)throw new Error('نام و نام خانوادگی را وارد کن.');const cred=await createUserWithEmailAndPassword(auth,email,password);await updateProfile(cred.user,{displayName:name});APP.user=cred.user;APP.status='pending';APP.authError='';toast('حساب ساخته شد؛ درخواست عضویت به فهرست مدیر ارسال می‌شود.')}else await signInWithEmailAndPassword(auth,email,password)}catch(e){APP.authError=authMessage(e);render()}}
 async function startApp(){try{onAuthStateChanged(auth,user=>{APP.authVersion++;const version=APP.authVersion;APP.loading=true;APP.authError='';render();handleAuthUser(user,version)}); }catch(e){APP.loading=false;APP.authError=authMessage(e);render()}}
-let writeQueue=Promise.resolve(),pendingOps=new Map(),pendingSeq=0,outboxStorageError='';
+let writeQueue=Promise.resolve(),pendingOps=new Map(),pendingSeq=0,outboxStorageError='',lastWriteFailures=[];
 const pendingStoreKey=()=>`pch-unsynced-v1:${APP.user?.uid||'anonymous'}`;
 const pendingOpKey=(collectionName,docId)=>`${collectionName}/${docId}`;
 function persistPendingOps(){if(!APP.user?.uid)return false;try{localStorage.setItem(pendingStoreKey(),JSON.stringify([...pendingOps.values()]));outboxStorageError='';return true}catch(e){console.warn('PCH local outbox storage failed',e);outboxStorageError=`پشتیبان محلی ذخیره نشد (${e?.name||'storage'})`;return false}}
@@ -158,24 +158,46 @@ function firestorePayload(op){
 const STAFF_EDITABLE_FIELDS=['title','projectId','due','priority','description','status','blockReason','notes','submittedAt','updatedAt'];
 async function writeOne(op){
  const ref=doc(db,op.cname,op.id);
- if(op.type==='delete'){await deleteDoc(ref);return}
+ if(op.type==='delete'){await deleteDoc(ref);return {written:true}}
  if(op.cname==='recurrenceInstances'&&op.createOnly){
-  await runTransaction(db,async tx=>{const existing=await tx.get(ref);if(!existing.exists())tx.set(ref,firestorePayload(op))});return
+  // Deterministic occurrence IDs: never overwrite a task another device already created.
+  let created=false,updated=false;
+  await runTransaction(db,async tx=>{
+   created=false;updated=false;
+   const existing=await tx.get(ref);
+   const desired=firestorePayload(op);
+   if(!existing.exists()){tx.set(ref,desired);created=true;return}
+   // A second device may have materialized this deterministic instance already.
+   // Apply the pending editable changes instead of either overwriting the entire
+   // document or silently discarding an unsynced status update.
+   const original=existing.data()||{},patch={};
+   const keys=isAdmin()?Object.keys(desired):STAFF_EDITABLE_FIELDS;
+   for(const field of keys){
+    if(Object.prototype.hasOwnProperty.call(desired,field)&&
+       JSON.stringify(original[field])!==JSON.stringify(desired[field]))patch[field]=desired[field];
+   }
+   if(Object.keys(patch).length){tx.update(ref,patch);updated=true}
+  });
+  return {written:created||updated,alreadyExists:!created&&!updated};
  }
- if(!isAdmin()&&(op.cname==='tasks'||op.cname==='recurrenceInstances')){
+ // Patch existing task documents rather than replacing them. This avoids wiping
+ // another user's changes and preserves manager-controlled fields on staff updates.
+ if(op.cname==='tasks'||op.cname==='recurrenceInstances'){
   const prior=(remoteD.tasks||[]).find(x=>x.id===op.id);
   if(prior){
    const model=op.cname==='recurrenceInstances'?'instances':'tasks';
    const oldPayload=toFirestore(model,prior),newPayload=firestorePayload(op),patch={};
-   for(const field of STAFF_EDITABLE_FIELDS){
+   const keys=isAdmin()?Object.keys(newPayload):STAFF_EDITABLE_FIELDS;
+   for(const field of keys){
     if(Object.prototype.hasOwnProperty.call(newPayload,field)&&
        JSON.stringify(oldPayload[field])!==JSON.stringify(newPayload[field]))patch[field]=newPayload[field];
    }
    if(Object.keys(patch).length)await updateDoc(ref,patch);
-   return;
+   return {written:!!Object.keys(patch).length};
   }
  }
  await setDoc(ref,firestorePayload(op));
+ return {written:true};
 }
 function syncWritePhase(op){if(op.cname==='recurrenceInstances')return 1;if(op.cname==='evaluations')return 2;if(op.cname==='activityHistory')return 3;return 0}
 function syncWriteLabel(op){const names={recurrences:'برنامه تکراری',recurrenceInstances:'نوبت تکراری',evaluations:'ارزیابی',activityHistory:'گزارش فعالیت',tasks:'فعالیت',projects:'پروژه',users:'کاربر',membershipRequests:'درخواست عضویت'};return (names[op.cname]||op.cname)+' · '+String(op.id||'').slice(-6)}
@@ -186,9 +208,10 @@ const worker=async()=>{while(cursor<phaseOps.length){const op=phaseOps[cursor++]
 if(op.cname==='recurrenceInstances'&&op.type!=='delete'&&op.value?.seriesId)pre=pendingOpKey('recurrences',op.value.seriesId);
 if(op.cname==='evaluations'&&op.type!=='delete'&&op.value?.taskId){const linked=list.find(x=>x.id===op.value.taskId&&(x.cname==='tasks'||x.cname==='recurrenceInstances'));if(linked)pre=pendingOpKey(linked.cname,linked.id)}
 if(pre&&failedKeys.has(pre)){const error=new Error('ذخیره پیش‌نیاز ناموفق بود؛ این مورد برای جلوگیری از ثبت ناسازگار در صف ماند.');error.code='dependency-failed';failed.push({op,error});failedKeys.add(key);continue}
-try{await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);applyRemoteOperation(op)}}catch(error){failed.push({op,error});failedKeys.add(key)}}};
+try{const result=await writeOne(op);const current=pendingOps.get(key);if(current&&current.rev===op.rev){pendingOps.delete(key);if(!result?.alreadyExists)applyRemoteOperation(op)}}catch(error){failed.push({op,error});failedKeys.add(key)}}};
 await Promise.all(Array.from({length:Math.min(6,phaseOps.length)},worker))}
 persistPendingOps();
+lastWriteFailures=failed.map(({op,error})=>({collection:op.cname,documentId:op.id,kind:op.type,createOnly:!!op.createOnly,seriesId:op.value?.seriesId||null,status:op.value?.status||null,code:error?.code||error?.name||'unknown',message:String(error?.message||'').slice(0,300)}));
 if(failed.length){const first=failed[0].error,code=first.code||first.name||'unknown';const err=new Error(failed.length+' مورد هنوز ذخیره نشده؛ '+syncWriteLabel(failed[0].op)+'. کد: '+code+' — '+(first.message||'علت نامشخص'));err.code=code;err.failures=failed;throw err}
 APP.syncError='';return true}
 function persist(){
@@ -238,7 +261,7 @@ function showSyncFailure(err){
  reportBackgroundSyncFailure(err);
  const count=pendingOps.size;
  // Do not obscure page content with a wall of internal Firebase errors.
- toast(`ذخیره آنلاین انجام نشد؛ ${num(count)} تغییر روی همین دستگاه محفوظ مانده. از «بیشتر» دوباره تلاش کن.`,true);
+ toast(`ذخیره آنلاین ناموفق: ${lastWriteFailures[0]?.collection||'Firestore'} (${lastWriteFailures[0]?.code||'خطای نامشخص'}). ${num(count)} تغییر محفوظ است؛ گزارش خطا در «بیشتر».`,true);
 }
 
 function syncStatusPill(){const text=!navigator.onLine?'بدون اینترنت':APP.syncError?'ذخیره ناموفق · تلاش دوباره':APP.pendingWrites?'در حال ذخیره':APP.loadingWorkspace?'در حال اتصال':'همگام';const cls=!navigator.onLine||APP.syncError?'sync-bad':APP.pendingWrites||APP.loadingWorkspace?'sync-wait':'sync-ok';return `<button type="button" class="sync-status ${cls}" ${APP.syncError?'data-action="retry-sync"':''} role="status" aria-live="polite" title="${esc(APP.syncError||text)}"><i></i><span>${text}</span></button>`}
@@ -271,7 +294,15 @@ function installAppRow(){return pwaInstalled()?'':`<button class="more-menu-row"
 function recoverySyncRow(){
  if(!pendingOps.size&&!APP.syncError)return '';
  const text=pendingOps.size?`${num(pendingOps.size)} تغییر در انتظار ذخیره`:'بررسی اتصال به Firebase';
- return `<button class="more-menu-row" data-action="retry-sync"><span class="more-menu-icon">${icon('refresh',20)}</span><span class="more-menu-copy"><b>تلاش دوباره برای ذخیره آنلاین</b><small>${text}؛ تغییرها پاک نشده‌اند</small></span>${icon('back',18)}</button>`;
+ return `<button class="more-menu-row" data-action="retry-sync"><span class="more-menu-icon">${icon('refresh',20)}</span><span class="more-menu-copy"><b>تلاش دوباره برای ذخیره آنلاین</b><small>${text}؛ تغییرها پاک نشده‌اند</small></span>${icon('back',18)}</button>
+ <button class="more-menu-row" data-action="export-sync-report"><span class="more-menu-icon">${icon('file',20)}</span><span class="more-menu-copy"><b>دریافت گزارش خطای ذخیره</b><small>فقط مسیر، نوع عملیات و کد خطا؛ بدون متن وظایف یا رمز عبور</small></span>${icon('back',18)}</button>`;
+}
+function exportSyncReport(){
+ const report={app:'PCH',clientVersion:'2026-11-22-v14',firebaseProject:firebaseConfig.projectId,
+  role:APP.role||'unknown',generatedAt:new Date().toISOString(),online:navigator.onLine,
+  pending:[...pendingOps.values()].map(op=>({collection:op.cname,documentId:op.id,kind:op.type,createOnly:!!op.createOnly,seriesId:op.value?.seriesId||null,status:op.value?.status||null})),
+  failures:lastWriteFailures,syncError:APP.syncError||null};
+ download('pch-sync-diagnostics-v14.json',JSON.stringify(report,null,2),'application/json;charset=utf-8');
 }
 function adminMorePage(){const items=[
  ['mine','lock','کارهای شخصی من','فقط خود آقای وثوق به این فعالیت‌ها دسترسی دارد'],
@@ -451,7 +482,7 @@ function download(name,data,mime){const u=URL.createObjectURL(new Blob([data],{t
 const csv=rows=>'\ufeff'+rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');
 function backup(){download('pch-vosough-backup-'+toEn(jstr(isoToday())).replaceAll('/','-')+'.json',JSON.stringify(D,null,2),'application/json;charset=utf-8');toast('فایل پشتیبان دریافت شد.')}
 function exportCsv(kind){let rows;if(kind==='csv-tasks')rows=[['عنوان','مسئول','پروژه','موعد شمسی','وضعیت','وزن','امتیاز'],...D.tasks.map(t=>[t.title,actorName(t.assignee),projectName(t.projectId),jstr(t.due),taskStatus(t),t.weight,taskScore(t)??''])];else if(kind==='csv-users')rows=[['نام','ایمیل','سمت','پروژه‌های مجاز','فعال'],...D.users.map(u=>[u.name,u.email,roles[u.role],u.projects.map(projectName).join('؛ '),u.active?'بله':'خیر'])];else rows=[['عنوان کار','نام نیرو','امتیاز','کیفیت','کامل بودن','زمان','تاریخ شمسی'],...D.evaluations.filter(e=>e.assignee!==MANAGER_ID&&!managerTask(D.tasks.find(t=>t.id===e.taskId))).map(e=>[D.tasks.find(t=>t.id===e.taskId)?.title||'فعالیت حذف‌شده',actorName(e.assignee),e.score,e.quality,e.complete,e.timing,jstr(e.date)])];download(kind+'-'+toEn(jstr(isoToday())).replaceAll('/','-')+'.csv',csv(rows),'text/csv;charset=utf-8')}
-function handleAction(act,el){const x=el?.dataset.id||'';switch(act){case'toggle-auth-mode':APP.authMode=APP.authMode==='signup'?'login':'signup';APP.authError='';render();break;case'google-auth':signInWithRedirect(auth,googleProvider).catch(e=>{APP.authError=authMessage(e);render()});break;case'sign-out':signOut(auth);break;case'set-palette':setPalette(x);break;case'set-theme-mode':setThemeMode(x);break;case'toggle-theme-mode':{const next=readTheme()==='dark'?'light':'dark';if(readPalette()!=='classic')setPalette('classic');setThemeMode(next);break}case'toggle-menu':U.mobileNav=!U.mobileNav;render();break;case'close-modal':closeModal();break;case'new-project':pushModal('project');break;case'edit-project':pushModal('project',x);break;case'new-task':pushModal('task');break;case'new-own-task':if(!isAdmin())return;U.page='mine';pushModal('task');break;case'edit-task':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('task',x);break;case'task-detail':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('details',x);break;case'new-request':case'new-user':return toast('عضویت فقط از فرم ثبت‌نام Firebase انجام می‌شود.',true);case'approve-user':pushModal('user',x);break;case'edit-user':pushModal('user',x);break;case'revoke-user':manageMember('revoke',x);break;case'remove-user':manageMember('remove',x);break;case'restore-user':manageMember('restore',x);break;case'retry-sync':if(!APP.user||!APP.approved)return toast('برای همگام‌سازی باید با حساب فعال وارد شوی.',true);persist().then(()=>{if(!pendingOps.size)toast('تغییرات با Firebase ثبت شد.');}).catch(showSyncFailure);break;case'new-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است؛ برای ثبت برنامه از حساب فعال همان سمت وارد شوید.',true);pushModal('recurring');break;case'edit-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است.',true);pushModal('recurring',x);break;case'grade-task':if(isAdmin()&&!managerTask(D.tasks.find(t=>t.id===x)))pushModal('grade',x);break;case'person-detail':if(isAdmin())pushModal('person',x);break;case'back-admin':if(isAdmin())setPage('panels');break;case'install-app':installApplication();break;case'to-panels':setPage('panels');break;case'go-reviews':U.filterStatus='review';setPage('tasks');break;case'show-project-tasks':U.filterProject=x;setPage('tasks');break;case'clear-filter':U.filterProject='all';U.filterStatus='all';U.filterText='';render();break;case'open-role':openRole(x);break;case'refresh-log':render();break;case'calendar-prev':U.calendarOffset--;U.calendarSelect=null;render();break;case'calendar-next':U.calendarOffset++;U.calendarSelect=null;render();break;case'calendar-today':U.calendarOffset=0;U.calendarSelect=null;render();break;case'month-day':U.calendarSelect=x;render();break;case'perf-prev':U.monthShift--;render();break;case'perf-next':U.monthShift++;render();break;case'backup':backup();break;case'restore':return toast('بازیابی فایل محلی به Firebase برای جلوگیری از انتقال ناخواسته داده غیرفعال است.',true);case'print':window.print();break;case'csv-tasks':case'csv-users':case'csv-scores':exportCsv(act);break;
+function handleAction(act,el){const x=el?.dataset.id||'';switch(act){case'toggle-auth-mode':APP.authMode=APP.authMode==='signup'?'login':'signup';APP.authError='';render();break;case'google-auth':signInWithRedirect(auth,googleProvider).catch(e=>{APP.authError=authMessage(e);render()});break;case'sign-out':signOut(auth);break;case'set-palette':setPalette(x);break;case'set-theme-mode':setThemeMode(x);break;case'toggle-theme-mode':{const next=readTheme()==='dark'?'light':'dark';if(readPalette()!=='classic')setPalette('classic');setThemeMode(next);break}case'toggle-menu':U.mobileNav=!U.mobileNav;render();break;case'close-modal':closeModal();break;case'new-project':pushModal('project');break;case'edit-project':pushModal('project',x);break;case'new-task':pushModal('task');break;case'new-own-task':if(!isAdmin())return;U.page='mine';pushModal('task');break;case'edit-task':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('task',x);break;case'task-detail':if(!isAdmin()&&!canSeeTask(D.tasks.find(t=>t.id===x)))return;pushModal('details',x);break;case'new-request':case'new-user':return toast('عضویت فقط از فرم ثبت‌نام Firebase انجام می‌شود.',true);case'approve-user':pushModal('user',x);break;case'edit-user':pushModal('user',x);break;case'revoke-user':manageMember('revoke',x);break;case'remove-user':manageMember('remove',x);break;case'restore-user':manageMember('restore',x);break;case'export-sync-report':exportSyncReport();break;case'retry-sync':if(!APP.user||!APP.approved)return toast('برای همگام‌سازی باید با حساب فعال وارد شوی.',true);persist().then(()=>{if(!pendingOps.size)toast('تغییرات با Firebase ثبت شد.');}).catch(showSyncFailure);break;case'new-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است؛ برای ثبت برنامه از حساب فعال همان سمت وارد شوید.',true);pushModal('recurring');break;case'edit-recurring':if(APP.readOnlyPreview)return toast('این پنل فقط برای مشاهده است.',true);pushModal('recurring',x);break;case'grade-task':if(isAdmin()&&!managerTask(D.tasks.find(t=>t.id===x)))pushModal('grade',x);break;case'person-detail':if(isAdmin())pushModal('person',x);break;case'back-admin':if(isAdmin())setPage('panels');break;case'install-app':installApplication();break;case'to-panels':setPage('panels');break;case'go-reviews':U.filterStatus='review';setPage('tasks');break;case'show-project-tasks':U.filterProject=x;setPage('tasks');break;case'clear-filter':U.filterProject='all';U.filterStatus='all';U.filterText='';render();break;case'open-role':openRole(x);break;case'refresh-log':render();break;case'calendar-prev':U.calendarOffset--;U.calendarSelect=null;render();break;case'calendar-next':U.calendarOffset++;U.calendarSelect=null;render();break;case'calendar-today':U.calendarOffset=0;U.calendarSelect=null;render();break;case'month-day':U.calendarSelect=x;render();break;case'perf-prev':U.monthShift--;render();break;case'perf-next':U.monthShift++;render();break;case'backup':backup();break;case'restore':return toast('بازیابی فایل محلی به Firebase برای جلوگیری از انتقال ناخواسته داده غیرفعال است.',true);case'print':window.print();break;case'csv-tasks':case'csv-users':case'csv-scores':exportCsv(act);break;
 case'delete-task':{if(!isAdmin())return toast('حذف فقط برای وثوق مجاز است.',true);const t=D.tasks.find(t=>t.id===x);if(!t)return;if(!confirm(`فعالیت «${t.title}» حذف شود؟\nاین کار از فهرست وظایف پاک می‌شود. سوابق مدیریتی حذف در تاریخچه باقی می‌ماند.`))return;record('delete','وثوق فعالیت «'+t.title+'» را حذف کرد',t.id);if(t.seriesId){const rr=D.recurrences.find(r=>r.id===t.seriesId);if(rr){rr.excluded||=[];rr.excluded.push(t.occurrenceKey)}}D.tasks=D.tasks.filter(q=>q.id!==t.id);if(U.modal)closeModal();save('فعالیت حذف شد.');break}
 case'delete-project':{if(!isAdmin())return;const p=proj(x);if(!p)return;const attached=D.tasks.filter(t=>t.projectId===x).length;if(!confirm(`پروژه «${p.name}» حذف شود؟\n${num(attached)} وظیفه موجود به «بدون پروژه» منتقل می‌شوند و خود وظایف حذف نخواهند شد.`))return;D.projects=D.projects.filter(q=>q.id!==x);D.tasks.forEach(t=>{if(t.projectId===x)t.projectId=''});D.recurrences.forEach(r=>{if(r.projectId===x)r.projectId=''});D.users.forEach(u=>u.projects=u.projects.filter(k=>k!==x));record('delete','حذف پروژه '+p.name,x);save('پروژه حذف شد؛ وظایف حفظ شدند.');break}
 case'reject-user':{if(!isAdmin())return;const r=D.requests.find(q=>q.id===x);if(r&&confirm(`درخواست ${r.name} رد شود؟`)){r.status='rejected';r.reviewedByUid=APP.user.uid;r.reviewedAt=new Date().toISOString();record('user','رد درخواست '+r.email);save('درخواست رد شد.')}break}
