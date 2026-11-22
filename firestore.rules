@@ -25,7 +25,7 @@ service cloud.firestore {
   function createOccurrence(d){
     return (admin()||activeStaff())&&d.seriesId is string&&exists(recurrencePath(d.seriesId))
       &&get(recurrencePath(d.seriesId)).data.state=='active'
-      &&d.createdByUid==request.auth.uid&&validStatus(d)&&d.status=='todo'
+      &&d.createdByUid==request.auth.uid&&validStatus(d)
       &&d.assigneeUid==get(recurrencePath(d.seriesId)).data.assigneeUid
       &&d.visibility==get(recurrencePath(d.seriesId)).data.visibility
       &&d.projectId==get(recurrencePath(d.seriesId)).data.projectId
