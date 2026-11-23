@@ -1,5 +1,5 @@
-/* PCH v20 — update-safe app shell. Data live in Firestore, never in service-worker caches. */
-const CACHE='pch-shell-v20-20261123-orphanfix';
+/* PCH v21 — update-safe app shell. Data live in Firestore, never in service-worker caches. */
+const CACHE='pch-shell-v21-20261124-manager-login';
 const SHELL=['./','./index.html','./app.js','./manifest.webmanifest','./pch-logo.png','./pch-icon-192.png','./pch-icon-180.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('pch-shell-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
