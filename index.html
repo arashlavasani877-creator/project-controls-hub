@@ -297,4 +297,31 @@ html[data-palette="navy"] .date-chip,html[data-palette="gold"] .date-chip{backgr
 .repeat-interval-options{display:flex;gap:14px;align-items:center;flex-wrap:wrap}.repeat-interval-options label{display:flex;align-items:center;gap:8px}.repeat-interval-options input[type=number]{width:85px}
 .remember-login{display:flex!important;gap:10px;align-items:center;cursor:pointer}.remember-login input{width:18px;height:18px;accent-color:var(--primary)}
 @media(max-width:480px){.daily-check-row{align-items:flex-start}.daily-check-row .btn{font-size:10px;padding:6px 9px}.task-accordion{padding:16px}}
-</style></head><body><div id="app"></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script type="module" src="./app.js?v=pch-20261123-19-orphan-deletion-requests"></script></body></html>
+
+/* v20: matte charcoal dark mode, no green hue in shared UI surfaces. */
+html[data-theme="dark"]{color-scheme:dark;--nav:#111113;--nav-2:#1b1b1e;--bg:#101012;--paper:#1c1c1f;--ink:#f2f2f4;--muted:#a8a8ad;--line:#353539;--primary:#c4c8d0;--primary-light:#303035;--green:#79c79c;--green-light:#24352c;--shadow:0 8px 22px rgba(0,0,0,.3)}
+html[data-theme="dark"] .topbar,html[data-theme="dark"] .pch-bottom-nav{background:rgba(28,28,31,.98)}
+html[data-theme="dark"] .sidebar{background:#141416}
+html[data-theme="dark"] .field,html[data-theme="dark"] input,html[data-theme="dark"] select,html[data-theme="dark"] textarea{background:#252528;color:var(--ink);border-color:var(--line)}
+html[data-theme="dark"] .field::placeholder,html[data-theme="dark"] input::placeholder{color:#98989d}
+html[data-theme="dark"] .btn{background:#303034;border-color:#44444a;color:var(--ink)}
+html[data-theme="dark"] .btn:hover{background:#3b3b40}
+html[data-theme="dark"] .btn.primary{background:#c4c8d0;border-color:#c4c8d0;color:#151519}
+html[data-theme="dark"] .btn.primary:hover{background:#d9dde3}
+html[data-theme="dark"] .date-chip,html[data-theme="dark"] .notice,html[data-theme="dark"] .welcome,html[data-theme="dark"] .role-banner,html[data-theme="dark"] .side-hint,html[data-theme="dark"] .more-menu-icon,html[data-theme="dark"] .perf-employee-stat,html[data-theme="dark"] .own-task,html[data-theme="dark"] .empty-state,html[data-theme="dark"] .perf-tip,html[data-theme="dark"] .perf-empty,html[data-theme="dark"] .perf-overview-pill{background:#28282c}
+html[data-theme="dark"] .month-days button,html[data-theme="dark"] .month-day,html[data-theme="dark"] .datecal-grid button,html[data-theme="dark"] .month-cell,html[data-theme="dark"] .day-agenda{background:#252529}
+html[data-theme="dark"] .month-days button:hover,html[data-theme="dark"] .more-menu-row:hover,html[data-theme="dark"] .day-agenda-item.day-agenda-link:hover,html[data-theme="dark"] .month-cell:hover{background:#343439}
+html[data-theme="dark"] .month-days button.active,html[data-theme="dark"] .month-day.selected,html[data-theme="dark"] .month-cell.chosen{background:#37373d;border-color:#9b9faa}
+html[data-theme="dark"] .jcal-trigger,html[data-theme="dark"] .calendar-trigger,html[data-theme="dark"] .datecal-head button,html[data-theme="dark"] .datecal-today{background:#303034;color:#c4c8d0}
+html[data-theme="dark"] .perf-employee .perf-employee-stat,html[data-theme="dark"] .perf-segments,html[data-theme="dark"] .progress{background:#333337}
+html[data-theme="dark"] .role-banner .field{background:#26262a}
+html[data-theme="dark"] .theme-switch{background:#2a2a2f}
+html[data-theme="dark"] .score-banner{background:linear-gradient(115deg,#202023,#333338)}
+html[data-theme="dark"] .kpi .ki,html[data-theme="dark"] .repeat-card-icon{background:#303035}
+html[data-theme="dark"] .pch-bottom-item{color:#b0b0b8}
+html[data-theme="dark"] .pch-bottom-item.active{background:#36363c;color:#ececf0}
+html[data-theme="dark"] .pch-bottom-item.bottom-create svg{color:#151519}
+html[data-theme="dark"] .pill.blue{background:#333844;color:#c1d3fc}
+html[data-theme="dark"] .nav-item.active{background:#333337}
+html[data-theme="dark"] .nav-item:hover{background:#29292e}
+</style></head><body><div id="app"></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script type="module" src="./app.js?v=pch-20261123-20-admin-role-matte-black"></script></body></html>
