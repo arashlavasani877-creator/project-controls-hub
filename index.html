@@ -440,6 +440,26 @@ html[data-theme="dark"] .overdue-meta>b{color:#ff8a9e}
 }
 /* Do not change card widths, grid column counts, or task card alignment. */
 
+
+/* v23.6: Manager-only navigation back from read-only role preview */
+.manager-return-wrap{display:flex;align-items:center;justify-content:flex-start;gap:10px;flex-wrap:wrap;margin:0 0 15px}
+.manager-return-btn{background:var(--primary-light);color:var(--primary);border-color:var(--primary);font-weight:850}
+.manager-return-btn:hover{filter:brightness(.97)}
+@media(max-width:540px){.manager-return-wrap{gap:6px;margin-bottom:10px}.manager-return-btn{width:100%;justify-content:center;padding:10px}.manager-return-wrap .hint{width:100%;text-align:center}}
+
+/* v23.7 team directory — compact expandable cards, mobile-first */
+.team-member-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.team-member-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
+.team-member-card{min-width:0;border:1px solid var(--line);border-radius:15px;background:var(--paper);padding:11px 12px;box-shadow:var(--shadow)}
+.team-member-archived{opacity:.8}
+.team-member-trigger{width:100%;display:flex;align-items:center;gap:9px;border:0;background:transparent;color:var(--ink);text-align:right;padding:2px 0;cursor:pointer}
+.team-member-avatar{width:39px;height:39px;border-radius:12px;background:var(--primary-light);color:var(--primary);display:grid;place-items:center;flex-shrink:0}
+.team-member-identity{flex:1;min-width:0}.team-member-identity strong{display:block;font-size:13px;font-weight:900;line-height:1.5}.team-member-identity small{display:block;font-size:10px;color:var(--muted);overflow-wrap:anywhere;text-align:right}
+.team-member-status{display:flex;flex-direction:column;gap:3px;align-items:center;flex-shrink:0}.team-member-status small{font-size:9px;font-weight:800;color:var(--muted)}.team-member-arrow{color:var(--muted)}
+.team-member-presence{font-size:10px;font-weight:750;color:var(--muted);margin:8px 0 1px}.team-presence{display:inline-flex;align-items:center;gap:6px}.team-presence i{height:7px;width:7px;border-radius:50%;background:#96a1ac;display:inline-block}.team-presence-live{color:#12915a}.team-presence-live i{background:#20b66b;box-shadow:0 0 0 3px #20b66b1e}
+.team-member-details{border-top:1px solid var(--line);margin-top:10px;padding-top:10px}.team-member-projects b{display:block;font-size:11px;margin-bottom:7px}.team-member-projects>div{display:flex;gap:5px;flex-wrap:wrap}.team-member-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:11px}.team-member-actions .btn{white-space:normal;min-height:37px;font-size:10px;padding:6px 8px;text-align:center;justify-content:center}
+@media(max-width:850px){.team-member-grid{grid-template-columns:1fr}.team-member-card{padding:12px}}
+
 </style></head><body><div id="app"><main class="auth-shell" data-pch-boot-placeholder><section class="auth-card" style="text-align:center" dir="rtl"><h2>Project Controls Hub</h2><p>در حال راه‌اندازی برنامه…</p></section></main></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script>
 // Minimal recovery UI independent of Firebase imports and app.js parsing.
 setTimeout(function(){
@@ -447,4 +467,4 @@ setTimeout(function(){
   if(!root||!root.querySelector('[data-pch-boot-placeholder]'))return;
   root.innerHTML='<main class="auth-shell" dir="rtl"><section class="auth-card" style="text-align:center"><h2>برنامه بارگذاری نشد</h2><p>اتصال اینترنت یا دریافت فایل‌های برنامه را بررسی کن. اطلاعات حساب و وظایف پاک نشده‌اند.</p><button class="btn primary" onclick="window.location.reload()">بارگذاری مجدد</button></section></main>';
 },15000);
-</script><script type="module" src="./app.js?v=pch-20261124-v23-2-progress-filter"></script></body></html>
+</script><script type="module" src="./app.js?v=pch-v23-8-manager-directory"></script></body></html>
