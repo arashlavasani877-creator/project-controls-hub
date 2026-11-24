@@ -106,6 +106,29 @@ service cloud.firestore {
       &&request.resource.data.keys().hasOnly(['deleted','deletedAt']);
     allow update,delete:if false;
   }
+  // V23: server-backed recycle bin. The archive is not visible to staff.
+  // Read follows the same visibility as the original task so that one manager
+  // cannot inspect the other manager's private tasks.
+  match /taskTrash/{id}{
+    allow get:if admin()&&readTask(resource.data.task);
+    // Queries are scoped using the root visibility/assignee fields.
+    allow list:if admin()&&(resource.data.visibility=='team'||
+      (resource.data.visibility=='owner_private'&&owner()&&resource.data.assigneeUid==request.auth.uid)||
+      (resource.data.visibility=='manager_private'&&pm()&&resource.data.assigneeUid==request.auth.uid));
+    allow create:if (admin()||(activeStaff()&&(
+      (exists(taskPath(id))&&canStaffDelete(get(taskPath(id)).data))||
+      (exists(instancePath(id))&&canStaffDelete(get(instancePath(id)).data)))))
+      &&request.resource.data.originalId==id
+      &&request.resource.data.deletedByUid==request.auth.uid
+      &&request.resource.data.task is map
+      &&request.resource.data.visibility==request.resource.data.task.visibility
+      &&request.resource.data.assigneeUid==request.resource.data.task.assigneeUid
+      &&request.resource.data.collection in ['tasks','recurrenceInstances']
+      &&request.resource.data.keys().hasOnly(['originalId','archivedAt','deletedByUid','task','collection','visibility','assigneeUid'])
+      &&(request.resource.data.visibility=='team'||readTask(request.resource.data.task));
+    allow update:if false;
+    allow delete:if admin()&&readTask(resource.data.task);
+  }
   match /settings/{id}{allow get,list:if admin();allow create,update,delete:if owner();}
   match /{doc=**}{allow read,write:if false;}
  }
