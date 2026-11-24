@@ -65,7 +65,19 @@ service cloud.firestore {
     request.resource.data.get('weight',0)==resource.data.get('weight',0);}
 
   function ownerTaskUpdate(){return owner()&&resource.data.visibility=='team'&&request.resource.data.visibility=='team'&&request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title','projectId','due','priority','description','status','blockReason','notes','submittedAt','updatedAt','assigneeUid','createdByUid','visibility','weight','evalId'])&&request.resource.data.get('weight',0)==resource.data.get('weight',0);}
-  match /adminAccess/{uid}{allow get:if signed()&&request.auth.uid==uid;allow list:if admin();allow create:if signed()&&request.auth.uid==uid&&request.resource.data.uid==uid&&request.resource.data.email==request.auth.token.email&&request.resource.data.active==true&&request.resource.data.role==(request.auth.token.email=='behrooz73.vosough@gmail.com'?'projectControlsManager':request.auth.token.email=='arashlavasani891@gmail.com'?'systemOwner':'')&&request.resource.data.keys().hasOnly(['uid','email','name','role','active','createdAt']);allow update,delete:if false;}
+  match /adminAccess/{uid}{allow get:if signed()&&request.auth.uid==uid;allow list:if admin();allow create:if signed()&&request.auth.uid==uid&&request.resource.data.uid==uid&&request.resource.data.email==request.auth.token.email&&request.resource.data.active==true&&request.resource.data.role==(request.auth.token.email=='behrooz73.vosough@gmail.com'?'projectControlsManager':request.auth.token.email=='arashlavasani891@gmail.com'?'systemOwner':'')&&request.resource.data.keys().hasOnly(['uid','email','name','role','active','createdAt']);allow update:if signed()&&request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','active'])
+    &&request.resource.data.uid==resource.data.uid
+    &&request.resource.data.email==resource.data.email
+    &&request.resource.data.role==resource.data.role
+    &&request.resource.data.active is bool
+    &&request.resource.data.name is string
+    &&request.resource.data.name.size()>=2
+    &&request.resource.data.name.size()<=80
+    &&(
+      (owner()&&uid==request.auth.uid&&resource.data.role=='systemOwner'&&request.resource.data.active==resource.data.active)
+      ||(owner()&&resource.data.role=='projectControlsManager'&&resource.data.email=='behrooz73.vosough@gmail.com')
+      ||(pm()&&uid==request.auth.uid&&resource.data.role=='projectControlsManager'&&request.resource.data.active==resource.data.active)
+    );allow delete:if false;}
   match /membershipRequests/{uid}{allow get:if(signed()&&request.auth.uid==uid)||admin();allow list:if admin();allow create:if signed()&&request.auth.uid==uid&&request.resource.data.uid==uid&&request.resource.data.email==request.auth.token.email&&request.resource.data.status=='pending'&&request.resource.data.keys().hasOnly(['uid','email','name','status','createdAt']);allow update:if admin()&&request.resource.data.uid==uid&&request.resource.data.email==resource.data.email&&request.resource.data.status in ['pending','approved','rejected'];allow delete:if false;}
   // App presence is self-reported at server time. Only managers read team presence.
   // A stale heartbeat (>125 seconds) is displayed offline by the UI.
