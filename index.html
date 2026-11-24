@@ -351,4 +351,11 @@ html[data-theme="dark"] .overdue-meta>b{color:#ff8a9e}
 .v23-trash-row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;direction:rtl;text-align:right;padding:14px 0;border-bottom:1px solid var(--line)}.v23-trash-row:last-child{border-bottom:0}.v23-trash-row strong{font-size:13px;font-weight:850}.v23-trash-row p{font-size:11px;color:var(--muted);margin:4px 0}.v23-trash-row small{font-size:10px;color:var(--muted)}
 
 .v23-remote-notice{padding:10px 12px;border-radius:10px;border:1px solid #c6daf3;background:#edf4fe;color:#24517e;font-size:11px;font-weight:700;margin-bottom:12px}
-</style></head><body><div id="app"></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script type="module" src="./app.js?v=pch-20261124-v22-duty-directory-dashboard"></script></body></html>
+</style></head><body><div id="app"><main class="auth-shell" data-pch-boot-placeholder><section class="auth-card" style="text-align:center" dir="rtl"><h2>Project Controls Hub</h2><p>در حال راه‌اندازی برنامه…</p></section></main></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script>
+// Minimal recovery UI independent of Firebase imports and app.js parsing.
+setTimeout(function(){
+  var root=document.getElementById('app');
+  if(!root||!root.querySelector('[data-pch-boot-placeholder]'))return;
+  root.innerHTML='<main class="auth-shell" dir="rtl"><section class="auth-card" style="text-align:center"><h2>برنامه بارگذاری نشد</h2><p>اتصال اینترنت یا دریافت فایل‌های برنامه را بررسی کن. اطلاعات حساب و وظایف پاک نشده‌اند.</p><button class="btn primary" onclick="window.location.reload()">بارگذاری مجدد</button></section></main>';
+},15000);
+</script><script type="module" src="./app.js?v=pch-20261124-v23-1-blank-fix"></script></body></html>

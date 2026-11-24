@@ -1,0 +1,25 @@
+PCH v23.1 — رفع صفحه سفید نسخه ۲۳
+
+علت قطعی قابل بازتولید:
+در فایل app.js نسخه ۲۳، در شاخه toggle-task-card از handleAction، یک پرانتز اضافه، SyntaxError ایجاد می‌کرد. جاوااسکریپت اصلاً اجرا نمی‌شد و کاربر صفحه سفید می‌دید.
+
+اصلاحات این بسته:
+۱. حذف پرانتز اضافه و تأیید نحوی با parser ماژول ES.
+۲. اصلاح شناسه فایل JS در index.html برای دریافت نسخه جدید از کش.
+۳. تغییر نسخه cache در sw.js.
+۴. افزودن رابط راه‌اندازی/پیام بارگذاری ناموفق در index.html تا خطای بارگذاری بعدی به صفحه سفید بی‌توضیح تبدیل نشود.
+
+فقط سه فایل را در ریشه مخزن GitHub جایگزین کن:
+app.js
+index.html
+sw.js
+
+Firebase Firestore Rules نسخه ۲۳ بدون تغییر باقی می‌ماند؛ آن را مجدد Publish نکن.
+اطلاعات مرورگر را پاک نکن (Clear Storage / Clear Site Data / حذف و نصب مجدد قبل از بکاپ انجام نده).
+پس از Commit و انتشار GitHub Pages، با اینترنت روشن سایت را یک‌بار Refresh کن. اگر PWA هنوز نسخه قبلی را نشان داد، آن را کاملاً ببند و دوباره باز کن؛ در صورت لزوم یک بار صفحه را در مرورگر اصلی Refresh کن. پاک کردن داده سایت لازم نیست.
+
+تست‌ها:
+- ES module syntax validation: Passed
+- Chromium mock startup: login visible
+- Chromium mock manager tasks and expand card: Passed
+- Real Firebase cross-account and GitHub production deployment: Not tested
