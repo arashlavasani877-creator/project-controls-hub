@@ -460,11 +460,69 @@ html[data-theme="dark"] .overdue-meta>b{color:#ff8a9e}
 .team-member-details{border-top:1px solid var(--line);margin-top:10px;padding-top:10px}.team-member-projects b{display:block;font-size:11px;margin-bottom:7px}.team-member-projects>div{display:flex;gap:5px;flex-wrap:wrap}.team-member-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:11px}.team-member-actions .btn{white-space:normal;min-height:37px;font-size:10px;padding:6px 8px;text-align:center;justify-content:center}
 @media(max-width:850px){.team-member-grid{grid-template-columns:1fr}.team-member-card{padding:12px}}
 
-</style></head><body><div id="app"><main class="auth-shell" data-pch-boot-placeholder><section class="auth-card" style="text-align:center" dir="rtl"><h2>Project Controls Hub</h2><p>در حال راه‌اندازی برنامه…</p></section></main></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script>
+
+/* PCH v23.11: true visual viewport centering for connection/loading gate */
+.auth-shell.pch-boot-center{
+ position:fixed !important;
+ inset:0 !important;
+ width:100% !important;
+ height:100vh !important;
+ height:100dvh !important;
+ min-height:0 !important;
+ margin:0 !important;
+ padding:clamp(12px,3vw,24px) !important;
+ display:flex !important;
+ justify-content:center !important;
+ align-items:center !important;
+ overflow-y:auto;
+ z-index:100;
+ background:var(--bg);
+ box-sizing:border-box;
+}
+.auth-shell.pch-boot-center>.auth-card{
+ width:min(100%,440px);
+ max-width:100%;
+ margin:auto !important;
+ box-sizing:border-box;
+ text-align:center !important;
+ padding:clamp(18px,4vw,26px);
+ display:flex;
+ flex-direction:column;
+ justify-content:center;
+ align-items:center;
+ gap:9px;
+}
+.pch-boot-center .brand-logo-img{margin:0 auto;display:block}
+.pch-boot-center .auth-card h1{margin:0;line-height:1.5;text-align:center;font-size:clamp(21px,5vw,27px)}
+.pch-boot-center .auth-card h2{margin:0;text-align:center}
+.pch-boot-center .auth-card p{margin:4px 0;text-align:center}
+.pch-boot-center .auth-card .progress{width:100%;margin:7px 0 0}
+@media(max-height:450px){.auth-shell.pch-boot-center{align-items:flex-start !important}}
+
+
+/* PCH v23.12: daily checklist status cards; normal card widths retained */
+.daily-card-list{display:flex;flex-direction:column;gap:12px}
+.daily-card-item{border:1px solid var(--line);border-radius:15px;padding:10px;background:var(--paper);min-width:0}
+.daily-card-item .daily-check-row{border-bottom:1px solid var(--line);margin-bottom:8px;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:3px 2px 10px}
+.daily-card-item .daily-check-row label{flex:1;min-width:0;display:flex;align-items:center;gap:10px;font-weight:850}
+.daily-card-item .daily-check-row input{width:19px;height:19px;accent-color:var(--primary)}
+.daily-card-item .daily-state{flex-shrink:0}
+.daily-card-item .v23-task{margin:0;width:100%;box-shadow:none}
+.daily-card-item .v23-task-trigger{padding-block:8px}
+.role-agenda-stack .v23-cards{width:100%}
+.role-agenda-stack .v23-task{width:100%;margin-inline:0}
+@media(max-width:540px){.daily-card-item{padding:8px}.daily-card-item .daily-check-row{gap:5px}.daily-card-item .daily-state{font-size:10px}.role-agenda-stack .panel{padding:12px}}
+
+/* v23.14: evenly distribute the four staff navigation items, preserve five admin tabs */
+@media(max-width:960px){
+  .pch-bottom-nav.pch-bottom-nav-four{grid-template-columns:repeat(4,minmax(0,1fr));}
+  .pch-bottom-nav.pch-bottom-nav-five{grid-template-columns:repeat(5,minmax(0,1fr));}
+}
+</style></head><body><div id="app"><main class="auth-shell pch-boot-center" data-pch-boot-placeholder><section class="auth-card" style="text-align:center" dir="rtl"><h2>Project Controls Hub</h2><p>در حال راه‌اندازی برنامه…</p></section></main></div><div id="modals"></div><div id="toasts" class="toasts" role="status" aria-live="polite"></div><div id="date-popup" class="datecal-popup"></div><script>
 // Minimal recovery UI independent of Firebase imports and app.js parsing.
 setTimeout(function(){
   var root=document.getElementById('app');
   if(!root||!root.querySelector('[data-pch-boot-placeholder]'))return;
-  root.innerHTML='<main class="auth-shell" dir="rtl"><section class="auth-card" style="text-align:center"><h2>برنامه بارگذاری نشد</h2><p>اتصال اینترنت یا دریافت فایل‌های برنامه را بررسی کن. اطلاعات حساب و وظایف پاک نشده‌اند.</p><button class="btn primary" onclick="window.location.reload()">بارگذاری مجدد</button></section></main>';
+  root.innerHTML='<main class="auth-shell pch-boot-center" dir="rtl"><section class="auth-card" style="text-align:center"><h2>برنامه بارگذاری نشد</h2><p>اتصال اینترنت یا دریافت فایل‌های برنامه را بررسی کن. اطلاعات حساب و وظایف پاک نشده‌اند.</p><button class="btn primary" onclick="window.location.reload()">بارگذاری مجدد</button></section></main>';
 },15000);
-</script><script type="module" src="./app.js?v=pch-v23-10-restored-assessments-review-reasons"></script></body></html>
+</script><script type="module" src="./app.js?v=pch-v23-14-four-even-nav"></script></body></html>

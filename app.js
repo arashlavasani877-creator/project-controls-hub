@@ -7,7 +7,7 @@ const firebaseApp=initializeApp(firebaseConfig),auth=getAuth(firebaseApp),db=get
 const copy=x=>JSON.parse(JSON.stringify(x));
 const APP={user:null,profile:null,adminAccess:null,request:null,role:null,approved:false,loading:true,loadingWorkspace:false,authMode:'login',authError:'',syncError:'',status:'loading',readOnlyPreview:false,subscriptions:[],sources:{},remotePaths:{},expectedReads:0,readyReads:0,readyReadSet:new Set(),sourceServerReady:new Set(),readsReady:false,generationStarted:false,authVersion:0,pendingWrites:0};
 const KEY='pch-vosough-clean-workspace-v4';
-const PCH_RELEASE='v23.9-manager-account-controls-boot-center';
+const PCH_RELEASE='v23.13-presence-reliability';
 const THEME_KEY='pch-pmo-theme-preference';
 function readTheme(){try{return localStorage.getItem(THEME_KEY)==='dark'?'dark':'light'}catch(e){return 'light'}}
 function readPalette(){return 'classic'} // Deprecated palette schemes are no longer selectable.
@@ -370,7 +370,7 @@ function refreshFromFirestore(){
  });
 }
 document.addEventListener('focusout',()=>{if(liveViewRefreshPending&&!U.modal){requestAnimationFrame(()=>{if(liveViewRefreshPending&&!U.modal)refreshFromFirestore()})}});
-function clearSubscriptions(){if(presenceTimer){clearInterval(presenceTimer);presenceTimer=null}for(const stop of APP.subscriptions){try{stop()}catch{}}APP.workspaceReadError=false;APP.subscriptions=[];APP.sources={};APP.remotePaths={};APP.expectedReads=0;APP.readyReads=0;APP.readyReadSet=new Set();APP.sourceServerReady=new Set();APP.readsReady=false;APP.generationStarted=false;D=blank();remoteD=blank()}
+function clearSubscriptions(){if(presenceTimer){clearInterval(presenceTimer);presenceTimer=null}if(presenceRetryTimer){clearTimeout(presenceRetryTimer);presenceRetryTimer=null}presenceWritePending=false;presenceErrorNotified='';presenceErrorCode='';for(const stop of APP.subscriptions){try{stop()}catch{}}APP.workspaceReadError=false;APP.subscriptions=[];APP.sources={};APP.remotePaths={};APP.expectedReads=0;APP.readyReads=0;APP.readyReadSet=new Set();APP.sourceServerReady=new Set();APP.readsReady=false;APP.generationStarted=false;D=blank();remoteD=blank()}
 function listenQuery(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,{includeMetadataChanges:true},snap=>{if(!snap.metadata.fromCache)APP.sourceServerReady.add(source);const rows=snap.docs.map(d=>normalizeDocument(key,d));syncSource(key,source,rows,collectionName);noteReadReady(source);refreshFromFirestore()},err=>{APP.workspaceReadError=true;APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
 function listenDocument(key,source,ref,collectionName){APP.expectedReads++;const unsub=onSnapshot(ref,{includeMetadataChanges:true},snap=>{if(source==='users-self'&&!snap.metadata.fromCache&&APP.approved&&APP.profile&&(!snap.exists()||snap.data().status!=='active')){APP.approved=false;APP.status='disabled';APP.loadingWorkspace=false;clearSubscriptions();render();return}if(!snap.metadata.fromCache)APP.sourceServerReady.add(source);syncSource(key,source,snap.exists()?[normalizeDocument(key,snap)]:[],collectionName);noteReadReady(source);refreshFromFirestore()},err=>{APP.workspaceReadError=true;APP.syncError=err.message||'خطای همگام‌سازی';noteReadReady(source);render()});APP.subscriptions.push(unsub)}
 function reconcilePendingTaskPaths(){
@@ -531,7 +531,7 @@ function mobileBottomNav(){const isRole=!!U.preview,active=isRole?U.roleTab:U.pa
  const entries=isRole?[
  ['home','home','خانه','nav'],['tasks','tasks','کارهای من','nav'],['recurring','calendar','تعهدات','nav'],['more','dots','بیشتر','nav']]:[
  ['dashboard','home','خانه','nav'],['tasks','tasks','وظایف','nav'],['recurring','calendar','تعهدات دوره‌ای','nav'],['performance','chart','ارزیابی','nav'],['more','dots','بیشتر','nav']];
- return `<nav class="pch-bottom-nav" aria-label="نوار اصلی برنامه">${entries.map(([key,ic,name,mode])=>`<button type="button" class="pch-bottom-item ${active===key?'active':''} ${mode==='action'?'bottom-create':''}" ${mode==='action'?'data-action="new-task"':`data-nav="${key}"`} aria-label="${name}" ${active===key?'aria-current="page"':''}>${icon(ic,21)}<span>${name}</span></button>`).join('')}</nav>`;
+ return `<nav class="pch-bottom-nav ${isRole?'pch-bottom-nav-four':'pch-bottom-nav-five'}" aria-label="نوار اصلی برنامه">${entries.map(([key,ic,name,mode])=>`<button type="button" class="pch-bottom-item ${active===key?'active':''} ${mode==='action'?'bottom-create':''}" ${mode==='action'?'data-action="new-task"':`data-nav="${key}"`} aria-label="${name}" ${active===key?'aria-current="page"':''}>${icon(ic,21)}<span>${name}</span></button>`).join('')}</nav>`;
 }
 function adminShell(){return `<div class="shell">${sidebar()}${U.mobileNav?'<div class="mobile-overlay" data-action="toggle-menu"></div>':''}<div class="main-shell">${topbar()}<main class="content">${renderAdmin()}</main>${mobileBottomNav()}</div></div>`}
 function roleShell(){const back=APP.readOnlyPreview&&['projectControlsManager','systemOwner'].includes(APP.role)?`<div class="manager-return-wrap"><button type="button" class="btn manager-return-btn" data-action="back-admin">${icon('back',16)} بازگشت به پنل مدیریت</button><span class="hint">در حال مشاهده پنل ${roles[U.preview]||'کاربری'}</span></div>`:'';return `<div class="shell">${sidebar()}${U.mobileNav?'<div class="mobile-overlay" data-action="toggle-menu"></div>':''}<div class="main-shell">${topbar()}<main class="content">${back}${renderRole()}</main>${mobileBottomNav()}</div></div>`}
@@ -622,7 +622,7 @@ function taskFilteredList(rows,privateView=false){
  else arr.sort(taskDefaultSort);return arr;
 }
 function taskStatsBar(all){const figures=[['all','کل وظایف',all.length],['doing','در حال انجام',all.filter(t=>t.status==='doing').length],['late','عقب‌افتاده',all.filter(dueLate).length],['done','خاتمه‌یافته',all.filter(t=>t.status==='done').length]];return `<div class="v23-statbar">${figures.map(([key,name,n])=>`<button type="button" data-action="task-quick" data-id="${key}" class="v23-stat ${U.taskQuick===key?'selected':''}"><b>${num(n)}</b><span>${name}</span></button>`).join('')}</div>`}
-function taskFilterPanel(rows,privateView=false){return `<div class="v23-filter-head"><div class="v23-search-wrap">${icon('search',17)}<input id="task-query" class="field" value="${esc(U.filterText)}" placeholder="جستجوی وظیفه، پروژه یا مسئول..." aria-label="جستجوی وظایف"></div>${B(icon('settings',16)+' فیلترها','toggle-task-filter','v23-filter-btn')}</div>${U.taskFilterOpen?`<div class="v23-filter-body"><label>پروژه<select class="field" data-filter="project"><option value="all">تمام پروژه‌ها</option><option value="">بدون پروژه</option>${D.projects.map(p=>`<option value="${esc(p.id)}" ${U.filterProject===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><label>وضعیت<select class="field" data-filter="status"><option value="all">تمام وضعیت‌ها</option>${Object.entries(statuses).map(([key,val])=>`<option value="${key}" ${U.filterStatus===key?'selected':''}>${esc(val)}</option>`).join('')}</select></label>${!privateView?`<label>مسئول<select class="field" data-task-person><option value="all">تمام کارکنان</option>${D.users.filter(u=>u.active).map(u=>`<option value="${esc(u.id)}" ${U.taskPerson===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></label>`:''}<label>مرتب‌سازی<select class="field" data-task-sort>${[['default','اولویت خودکار'],['new','جدیدترین'],['due','نزدیک‌ترین موعد'],['late','بیشترین تأخیر']].map(([v,l])=>`<option value="${v}" ${U.taskSort===v?'selected':''}>${l}</option>`).join('')}</select></label><label>گروه‌بندی<select class="field" data-task-group>${[['none','بدون گروه‌بندی'],['project','بر اساس پروژه'],['person','بر اساس مسئول'],['status','بر اساس وضعیت']].filter(([v])=>!privateView||v!=='person').map(([v,l])=>`<option value="${v}" ${U.taskGroup===v?'selected':''}>${l}</option>`).join('')}</select></label>${B('پاک‌کردن فیلترها','clear-filter','sm')}</div>`:''}`}
+function taskFilterPanel(rows,privateView=false){return `<div class="v23-filter-head"><div class="v23-search-wrap">${icon('search',17)}<input id="task-query" class="field" value="${esc(U.filterText)}" placeholder="جستجوی وظیفه، پروژه یا مسئول..." aria-label="جستجوی وظایف"></div>${B(icon('settings',16)+' فیلترها','toggle-task-filter','v23-filter-btn')}</div>${U.taskFilterOpen?`<div class="v23-filter-body"><label>پروژه<select class="field" data-filter="project"><option value="all">تمام پروژه‌ها</option><option value="">بدون پروژه</option>${D.projects.map(p=>`<option value="${esc(p.id)}" ${U.filterProject===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select></label><label>وضعیت<select class="field" data-filter="status"><option value="all">تمام وضعیت‌ها</option>${Object.entries(statuses).map(([key,val])=>`<option value="${key}" ${U.filterStatus===key?'selected':''}>${esc(val)}</option>`).join('')}</select></label>${!privateView&&isAdmin()&&!U.preview?`<label>مسئول<select class="field" data-task-person><option value="all">تمام کارکنان</option>${D.users.filter(u=>u.active).map(u=>`<option value="${esc(u.id)}" ${U.taskPerson===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></label>`:''}<label>مرتب‌سازی<select class="field" data-task-sort>${[['default','اولویت خودکار'],['new','جدیدترین'],['due','نزدیک‌ترین موعد'],['late','بیشترین تأخیر']].map(([v,l])=>`<option value="${v}" ${U.taskSort===v?'selected':''}>${l}</option>`).join('')}</select></label><label>گروه‌بندی<select class="field" data-task-group>${[['none','بدون گروه‌بندی'],['project','بر اساس پروژه'],['person','بر اساس مسئول'],['status','بر اساس وضعیت']].filter(([v])=>(!privateView&&isAdmin()&&!U.preview)||v!=='person').map(([v,l])=>`<option value="${v}" ${U.taskGroup===v?'selected':''}>${l}</option>`).join('')}</select></label>${B('پاک‌کردن فیلترها','clear-filter','sm')}</div>`:''}`}
 function taskGroupName(t,privateView=false){return U.taskGroup==='project'?projectName(t.projectId):U.taskGroup==='person'&&!privateView?actorName(t.assignee):U.taskGroup==='status'?taskStatus(t):'همه'}
 function taskCardsMarkup(rows,privateView=false){if(!rows.length)return empty('وظیفه‌ای با این شرایط وجود ندارد','فیلترها را بررسی کن یا یک فعالیت جدید ثبت کن.');if(U.taskGroup==='none'||privateView&&U.taskGroup==='person')return `<div class="v23-cards">${rows.map(t=>taskCommandCard(t,privateView)).join('')}</div>`;const keys=[...new Set(rows.map(t=>taskGroupName(t,privateView)))];return keys.map(name=>{const group=rows.filter(t=>taskGroupName(t,privateView)===name),late=group.filter(dueLate).length;return `<details class="v23-group" open><summary><strong>${esc(name)}</strong><span>${num(group.length)} وظیفه${late?' · '+num(late)+' عقب‌افتاده':''}</span></summary><div class="v23-cards">${group.map(t=>taskCommandCard(t,privateView)).join('')}</div></details>`}).join('')}
 function taskRelatedHistory(t){const ids=[t.id,t.restoredFromId].filter(Boolean);return D.events.filter(e=>ids.includes(e.entity||e.taskId)&&(!managerTask(t)||e.visibility===t.visibility)).slice().sort((a,b)=>String(b.at||'').localeCompare(String(a.at||'')))}
@@ -771,9 +771,61 @@ function directoryMembers(){
  }
  return staff;
 }
-function presenceNow(){return new Date().toISOString()}
-async function heartbeat(online=true){if(!APP.approved||!APP.user?.uid||!navigator.onLine)return;try{await setDoc(doc(db,'presence',APP.user.uid),{uid:APP.user.uid,online,lastSeen:serverTimestamp()},{merge:true})}catch(err){console.warn('Presence heartbeat did not reach Firestore',err?.code||err)}}
-function setupPresence(){if(presenceTimer){clearInterval(presenceTimer);presenceTimer=null}heartbeat(true);presenceTimer=setInterval(()=>{if(document.visibilityState==='visible'&&APP.approved)heartbeat(true)},45000);if(isAdmin()){const stop=onSnapshot(collection(db,'presence'),snap=>{teamPresence=Object.fromEntries(snap.docs.map(d=>{const v=d.data();return [d.id,{online:v.online===true,lastSeen:v.lastSeen?.toDate?v.lastSeen.toDate().toISOString():null}]}));if(U.page==='users'&&!U.preview)refreshFromFirestore()},err=>console.warn('Presence listener unavailable',err?.code||err));APP.subscriptions.push(stop)}}
+// Presence writes must be confirmed by Firestore; do not mistake local cache for a successful visit.
+let presenceWritePending=false,presenceRetryTimer=null,presenceErrorCode='',presenceErrorNotified='';
+function presenceErrorMessage(error){
+ const code=String(error?.code||'unknown');
+ if(code==='permission-denied')return 'آخرین بازدید ثبت نشد: قوانین دسترسی presence در Firebase را منتشر یا بررسی کن.';
+ if(code==='unavailable'||code==='deadline-exceeded')return 'ثبت آخرین بازدید به دلیل قطع ارتباط با Firebase انجام نشد؛ دوباره تلاش می‌شود.';
+ return 'خطای ثبت آخرین بازدید در Firebase: '+code;
+}
+function queuePresenceRetry(){
+ if(presenceRetryTimer||!APP.approved)return;
+ presenceRetryTimer=setTimeout(()=>{presenceRetryTimer=null;if(APP.approved&&navigator.onLine&&document.visibilityState==='visible')heartbeat(true)},15000);
+}
+async function heartbeat(online=true){
+ if(!APP.approved||!APP.user?.uid||!navigator.onLine||presenceWritePending)return false;
+ const uid=APP.user.uid;
+ presenceWritePending=true;
+ try{
+  // Set a server timestamp for each authenticated account. Store no task or profile data here.
+  await setDoc(doc(db,'presence',uid),{uid,online:online===true,lastSeen:serverTimestamp()},{merge:true});
+  presenceErrorCode='';presenceErrorNotified='';return true;
+ }catch(err){
+  const code=String(err?.code||'unknown');presenceErrorCode=code;
+  console.error('Firebase presence write failed',code,err);
+  if(presenceErrorNotified!==code){presenceErrorNotified=code;toast(presenceErrorMessage(err),true)}
+  if(online)queuePresenceRetry();
+  return false;
+ }finally{presenceWritePending=false}
+}
+function setupPresence(){
+ if(presenceTimer){clearInterval(presenceTimer);presenceTimer=null}
+ if(presenceRetryTimer){clearTimeout(presenceRetryTimer);presenceRetryTimer=null}
+ heartbeat(true);
+ presenceTimer=setInterval(()=>{
+  if(document.visibilityState==='visible'&&APP.approved)heartbeat(true);
+  // Presence age is time-based; update manager directory even without a new snapshot.
+  if(isAdmin()&&U.page==='users'&&!U.preview)refreshFromFirestore();
+ },45000);
+ if(isAdmin()){
+  const stop=onSnapshot(collection(db,'presence'),{includeMetadataChanges:true},snap=>{
+   // A cache-only read is provisional; do not claim that absence means no server record.
+   if(snap.metadata.fromCache)return;
+   teamPresence=Object.fromEntries(snap.docs.map(d=>{
+    const v=d.data(),stamp=v.lastSeen?.toDate?v.lastSeen.toDate().toISOString():null;
+    return[d.id,{online:v.online===true,lastSeen:stamp}];
+   }));
+   if(U.page==='users'&&!U.preview)refreshFromFirestore();
+  },err=>{
+   console.error('Firebase presence listener failed',err?.code||err);
+   if(presenceErrorNotified!=='listener-'+(err?.code||'')){
+    presenceErrorNotified='listener-'+(err?.code||'');toast('خواندن حضور اعضا از Firebase ناموفق بود: '+(err?.code||'خطای اتصال'),true);
+   }
+  });
+  APP.subscriptions.push(stop);
+ }
+}
 function usersPage(){const allMembers=directoryMembers(),members=allMembers.filter(u=>!u.removed),archived=allMembers.filter(u=>u.removed),filter=U.teamFilter||'all';const shown=allMembers.filter(u=>filter==='all'?!u.removed:filter==='active'?!u.removed&&u.active:filter==='disabled'?!u.removed&&!u.active:!!u.removed);return `${heading('کاربران و درخواست‌ها','مدیریت حساب‌ها، نقش‌ها، پروژه‌ها و وضعیت حضور اعضا')}<div class="panel" style="margin-bottom:18px"><div class="panel-title"><h2>درخواست‌های در انتظار</h2>${pill(num(D.requests.length)+' درخواست','amber')}</div>${D.requests.length?D.requests.map(r=>`<div class="request-card"><div class="request-details">${avatar(r.name)}<div><strong>${esc(r.name)}</strong><p dir="ltr">${esc(r.email)}</p><p>${jstr(r.date)}</p></div></div><div class="row-flex"><button class="btn sm primary" data-action="approve-user" data-id="${r.id}">بررسی و تأیید</button><button class="btn sm danger" data-action="reject-user" data-id="${r.id}">رد</button></div></div>`).join(''):empty('درخواست عضویت جدیدی وجود ندارد')}</div><div class="panel"><div class="panel-title"><h2>افراد تیم</h2>${pill(num(members.length)+' نفر','blue')}</div><div class="team-member-filters">${Object.entries(teamFilterOptions).map(([key,label])=>`<button type="button" class="btn sm ${filter===key?'primary':''}" data-action="filter-team" data-id="${key}">${label}</button>`).join('')}</div><p class="hint" style="margin-bottom:12px">برای مشاهده عملیات، کارت هر نفر را باز کن. آخرین بازدید از زمان فعال‌سازی نسخه جدید ثبت می‌شود.</p>${shown.length?`<div class="team-member-grid">${shown.map(memberCard).join('')}</div>`:empty('عضوی در این دسته وجود ندارد')}</div>`}
 
 function panelsPage(){return `${heading('پنل‌ها','آقای وثوق می‌تواند برای آزمون هر نقش وارد شود. کارکنان فقط فعالیت‌های خودشان را می‌بینند.')}<div class="notice" style="margin-bottom:20px">${icon('lock',17)} شبیه‌ساز پنل‌ها فعال است، ولی هر نقش فقط کارهای ثبت‌شده توسط خودش یا ارجاع‌شده به خودش را می‌بیند؛ نه کار هم‌پروژه‌ای‌ها و نه کارهای خصوصی آقای وثوق.</div><div class="roles-grid">${Object.entries(roles).map(([k,name])=>{const users=D.users.filter(u=>u.active&&u.role===k);return `<div class="role-card"><div class="role-icon">${icon(roleIcon[k],25)}</div><h3>پنل ${name}</h3><p>${k==='supervisor'?'پیگیری فعالیت‌های خود و کارهای ارجاع‌شده':k==='senior'?'انجام کارهای تخصصی و گزارش‌دهی':k==='expert'?'ثبت فعالیت، تغییر وضعیت و ارسال خروجی':'ثبت کارهای آموزشی و گزارش فعالیت'}</p><div class="hint">${num(users.length)} کاربر فعال با این سمت</div><button class="btn primary full" data-action="open-role" data-id="${k}">${icon('eye',15)} ورود و کار با پنل</button></div>`}).join('')}</div>`}
@@ -786,23 +838,25 @@ function renderRole(){const items=actorTasks();if(U.roleTab==='tasks')return rol
 function roleTaskCard(t,compact=false){return taskCommandCard(t,false)}
 function isDailyOccurrence(t){return !!t.seriesId&&D.recurrences.some(r=>r.id===t.seriesId&&r.frequency==='daily')}
 function roleTaskPage(items){
- const today=isoToday(),byDate=(a,b)=>a.due.localeCompare(b.due)||a.title.localeCompare(b.title);
- const daily=items.filter(t=>t.due===today&&isDailyOccurrence(t)).sort(byDate);
- const todayOther=items.filter(t=>t.due===today&&!isDailyOccurrence(t)).sort(byDate);
- const overdue=items.filter(t=>t.due<today&&t.status!=='done').sort(byDate);
- const future=items.filter(t=>t.due>today).sort(byDate);
- const pastDone=items.filter(t=>t.due<today&&t.status==='done').sort((a,b)=>b.due.localeCompare(a.due));
+ const today=isoToday();
+ const filtered=taskFilteredList(items);
+ const daily=filtered.filter(t=>t.due===today&&isDailyOccurrence(t));
+ const todayOther=filtered.filter(t=>t.due===today&&!isDailyOccurrence(t));
+ const overdue=filtered.filter(t=>t.due<today&&t.status!=='done');
+ const future=filtered.filter(t=>t.due>today);
+ const pastDone=filtered.filter(t=>t.due<today&&t.status==='done');
  const done=daily.filter(t=>t.status==='done').length;
- const check=daily.length?`<section class="panel checklist-panel"><div class="panel-title"><h2>چک‌لیست روزانه</h2><small>${num(done)} از ${num(daily.length)} انجام‌شده</small></div><div class="progress" style="margin-bottom:15px"><span style="width:${pct(done,daily.length)}%"></span></div>${daily.map(t=>`<div class="daily-check-row"><label><input type="checkbox" data-daily-check="${esc(t.id)}" ${t.status==='done'?'checked':''}><span class="daily-check-title">${esc(t.title)}</span></label><button type="button" class="btn sm" data-action="task-detail" data-id="${esc(t.id)}">جزئیات</button></div>`).join('')}<p class="hint">هر روز یک سابقه مستقل دارد. اگر امروز تیک نخورد، فردا در «عقب‌افتاده» باقی می‌ماند.</p></section>`:'';
- return `${heading('کارهای من','وظایف امروز، کارهای عقب‌افتاده و برنامه‌های آینده',B(icon('plus',15)+' فعالیت جدید','new-task','primary'))}
- <div class="role-agenda-stack">
- ${check}
- ${todayOther.length?`<section class="panel"><div class="panel-title"><h2>سایر کارهای امروز</h2><small>${num(todayOther.length)} فعالیت</small></div>${todayOther.map(t=>roleTaskCard(t)).join('')}</section>`:''}
- <details class="panel task-accordion" ${overdue.length?'':'open'}><summary><span>کارهای عقب‌افتاده</span><span class="tag red">${num(overdue.length)} مورد</span></summary><div class="accordion-content">${overdue.length?overdue.map(t=>roleTaskCard(t,true)).join(''):'<p class="hint">کار عقب‌افتاده‌ای وجود ندارد.</p>'}</div></details>
- ${future.length?`<details class="panel task-accordion"><summary><span>کارهای موعد آینده</span><span class="tag blue">${num(future.length)}</span></summary><div class="accordion-content">${future.map(t=>roleTaskCard(t,true)).join('')}</div></details>`:''}
- ${pastDone.length?`<details class="panel task-accordion"><summary><span>سوابق انجام‌شده روزهای قبل</span><span class="tag green">${num(pastDone.length)}</span></summary><div class="accordion-content">${pastDone.map(t=>roleTaskCard(t,true)).join('')}</div></details>`:''}
- ${!items.length?`<section class="panel">${empty('هنوز وظیفه‌ای ثبت نشده','از بخش فعالیت جدید می‌توان یک کار تعریف کرد.','new-task','ثبت فعالیت')}</section>`:''}
- </div>`
+ const check=daily.length?`<section class="panel checklist-panel"><div class="panel-title"><h2>چک‌لیست روزانه</h2><small>${num(done)} از ${num(daily.length)} خاتمه‌یافته</small></div><div class="progress" style="margin-bottom:12px"><span style="width:${pct(done,daily.length)}%"></span></div><div class="daily-card-list">${daily.map(t=>`<div class="daily-card-item"><div class="daily-check-row"><label><input type="checkbox" data-daily-check="${esc(t.id)}" ${t.status==='done'?'checked':''} ${APP.readOnlyPreview?'disabled':''}><span class="daily-check-title">${esc(t.title)}</span></label><span class="daily-state">${pill(taskStatus(t),statusColor[t.status])}</span></div>${taskCommandCard(t)}</div>`).join('')}</div><p class="hint">تیک یعنی خاتمه‌یافته؛ برای در حال انجام، توقف یا انتظار، جزئیات همین نوبت را باز کنید. نوبت هر روز جداگانه ذخیره می‌شود.</p></section>`:'';
+ const section=(name,arr,tag,open=false)=>arr.length?`<details class="panel task-accordion" ${open?'open':''}><summary><span>${name}</span><span class="tag ${tag}">${num(arr.length)} مورد</span></summary><div class="accordion-content"><div class="v23-cards">${arr.map(t=>taskCommandCard(t)).join('')}</div></div></details>`:'';
+ return `${heading('کارهای من','جستجو و پیگیری وضعیت هر نوبت با کارت‌های یکسان با پنل مدیریت',B(icon('plus',15)+' فعالیت جدید','new-task','primary'))}
+ <div class="v23-command" dir="rtl">${taskStatsBar(items)}${taskFilterPanel(items)}<div class="v23-count">${num(filtered.length)} وظیفه نمایش داده می‌شود</div></div>
+ <div class="role-agenda-stack">${check}
+ ${todayOther.length?`<section class="panel"><div class="panel-title"><h2>سایر کارهای امروز</h2><small>${num(todayOther.length)} فعالیت</small></div><div class="v23-cards">${todayOther.map(t=>taskCommandCard(t)).join('')}</div></section>`:''}
+ ${section('کارهای عقب‌افتاده',overdue,'red',true)}
+ ${section('کارهای موعد آینده',future,'blue')}
+ ${section('سوابق انجام‌شده روزهای قبل',pastDone,'green')}
+ ${!filtered.length?`<section class="panel">${empty('هیچ وظیفه‌ای با این فیلتر پیدا نشد','فیلترها را تغییر دهید یا یک فعالیت جدید ثبت کنید.')}</section>`:''}
+ </div>`;
 }
 
 function roleProfile(){return `${heading('پروفایل '+roles[U.preview],'هویت و سطح دسترسی فعلی در این پیش‌نمایش')}<div class="panel profile-card"><div class="row-flex">${avatar(actorName(U.actor))}<div><h2>${esc(actorName(U.actor))}</h2><p>${esc(APP.user?.email||'')}</p></div></div><div class="divider"></div><b>سمت: ${roles[U.preview]}</b><p>پروژه‌های قابل دسترس: ${actorProjects().length?actorProjects().map(projectName).join('، '):'بدون پروژه'}</p><div class="notice">سمت و دسترسی‌های واقعی فقط توسط آقای وثوق تعیین می‌شوند.</div></div>`}
@@ -982,6 +1036,31 @@ async function changePrivateTaskStatus(taskId,newStatus){
   toast('وضعیت روی سرور ثبت نشد: '+authMessage(err),true);
  }finally{privateStatusWrites.delete(taskId);render()}
 }
+async function changeDailyCheck(id,checked){
+ const t=D.tasks.find(x=>x.id===id);
+ if(!t||!isDailyOccurrence(t)||t.due!==isoToday()||!canSeeTask(t)||APP.readOnlyPreview)return toast('امکان تغییر این نوبت وجود ندارد.',true);
+ const next=checked?'done':'todo';
+ if(t.status===next)return;
+ if(!navigator.onLine){render();return toast('برای ثبت قطعی به اینترنت نیاز است.',true)}
+ const ref=doc(db,APP.remotePaths[id]||(t.seriesId?'recurrenceInstances':'tasks'),id),prev=copy(t);
+ try{
+  await writeQueue;
+  if([...pendingOps.values()].some(op=>op.key==='tasks'&&op.id===id))throw new Error('تغییر ذخیره‌نشده قبلی وجود دارد.');
+  await runTransaction(db,async tx=>{
+   const snap=await tx.get(ref);
+   if(!snap.exists())throw new Error('این نوبت در سرور وجود ندارد.');
+   const current=snap.data();
+   if(current.status!==prev.status||String(current.updatedAt||'')!==String(prev.updatedAt||''))throw new Error('وضعیت این نوبت از دستگاه دیگری تغییر کرده است.');
+   tx.update(ref,{status:next,submittedAt:checked?isoToday():null,updatedAt:new Date().toISOString()});
+  });
+  const confirmed=await getDocFromServer(ref);
+  if(!confirmed.exists()||confirmed.data().status!==next)throw new Error('تغییر روی سرور تأیید نشد.');
+  Object.assign(t,{status:next,submittedAt:confirmed.data().submittedAt,updatedAt:confirmed.data().updatedAt});
+  record('status',`چک‌لیست روزانه ${jstr(t.due)}: ${statuses[prev.status]} ← ${statuses[next]}`,id);
+  const event=D.events.at(-1);if(event)try{await setDoc(doc(db,'activityHistory',event.id),toFirestore('events',event))}catch(e){console.warn('Audit write failed',e)}
+  toast('وضعیت همین نوبت روزانه در Firebase ذخیره شد.');render();
+ }catch(e){render();toast('ثبت وضعیت انجام نشد: '+String(e?.message||e),true)}
+}
 function changeTaskStatus(task,newStatus){const t=D.tasks.find(x=>x.id===task);if(!t||!canSeeTask(t)||(isAdmin()&&!managerTask(t)&&t.assignee!==APP.user?.uid)||!['todo','doing','blocked','review','done'].includes(newStatus))return;if(newStatus==='blocked'){const reason=prompt('دلیل توقف فعالیت را بنویسید (اجباری):',t.status==='blocked'?t.blockReason||'':'');if(reason===null){render();return}if(!reason.trim()){toast('برای انتخاب وضعیت متوقف، ثبت دلیل توقف ضروری است.',true);render();return}t.blockReason=reason.trim();(t.notes||=[]).push({text:'دلیل توقف: '+reason.trim(),by:actorName(U.actor),date:isoToday()})}if(newStatus==='review'){const reason=prompt('توضیح انتظار برای تأیید یا پاسخ دیگران را بنویسید:','');if(reason===null)return;if(!reason.trim())return toast('برای وضعیت در انتظار تأیید یا پاسخ، توضیح الزامی است.',true);(t.notes||=[]).push({text:'در انتظار تأیید یا پاسخ: '+reason.trim(),by:actorName(APP.user.uid),date:isoToday()});t.submittedAt=isoToday()}if(newStatus==='done')t.submittedAt=isoToday();if(t.status==='done'&&newStatus!=='done'&&newStatus!=='review')t.submittedAt=null;t.status=newStatus;t.updatedAt=new Date().toISOString();if(newStatus!=='blocked'){(t.notes||=[]).push({text:'وضعیت به «'+statuses[newStatus]+'» تغییر کرد',by:actorName(APP.user.uid),date:isoToday()})}record('status',`وضعیت به «${statuses[newStatus]}» تغییر کرد`,t.id);save('وضعیت کار ثبت شد و در پنل وثوق قابل مشاهده است.')}
 function updateTask(fd){const old=D.tasks.find(t=>t.id===U.edit),edit=!!old,title=String(fd.get('title')||'').trim(),due=jparse(fd.get('dueJ'));if(!title||!due)return toast('عنوان و تاریخ شمسی معتبر وارد کنید.',true);const projectId=String(fd.get('projectId')||''),requested=String(fd.get('assignee')||(isAdmin()?'':APP.user.uid)),managerPrivate=isAdmin()&&(requested===MANAGER_ID||(edit&&managerTask(old)&&requested===APP.user.uid)),assignee=managerPrivate?APP.user.uid:requested;if(projectId&&!proj(projectId))return toast('پروژه انتخاب‌شده معتبر نیست.',true);if(isAdmin()&&!managerPrivate&&(!assignee||assignee===MANAGER_ID))return toast('برای فعالیت تیمی ابتدا یک کارمند فعال انتخاب کن.',true);if(!isAdmin()&&(managerPrivate||assignee!==APP.user.uid||!availableProject(projectId)))return toast('شما مجوز انتخاب این مسئول یا پروژه را ندارید.',true);if(assignee!==APP.user.uid&&!person(assignee)?.active)return toast('مسئول باید یک حساب تأییدشده باشد.',true);if(projectId&&assignee!==APP.user.uid&&!isOwnerDirectoryUser(person(assignee))&&!person(assignee)?.projects.includes(projectId))return toast('این مسئول به پروژه انتخاب‌شده دسترسی ندارد.',true);if(edit&&!canEditTask(old))return toast('امکان ویرایش این فعالیت وجود ندارد.',true);const desired=String(fd.get('status')||old?.status||'todo');if(!Object.hasOwn(statuses,desired))return toast('وضعیت نامعتبر است.',true);if(desired==='blocked'&&edit&&isAdmin()&&!String(fd.get('blockReason')||'').trim())return toast('برای وضعیت متوقف، دلیل توقف ضروری است.',true);if(desired==='review'&&edit&&isAdmin()&&old.status!=='review'&&!String(fd.get('reviewReason')||'').trim())return toast('برای وضعیت در انتظار تأیید یا پاسخ دیگران، توضیح الزامی است.',true);if(edit){if(isAdmin()&&managerTask(old)&&!managerPrivate&&!confirm('این فعالیت خصوصی با واگذاری به کارمند، برای مسئول جدید قابل مشاهده می‌شود. ادامه می‌دهید؟'))return;Object.assign(old,{title,projectId,assignee,due,priority:String(fd.get('priority')||'normal'),weight:managerPrivate?0:isProjectControlsManager()?(+fd.get('weight')||3):(old.weight??0),visibility:managerPrivate?(isSystemOwner()?'owner_private':'manager_private'):'team',description:String(fd.get('description')||'').trim(),updatedAt:new Date().toISOString()});if(isAdmin()){if(desired==='blocked'){const reason=String(fd.get('blockReason')||'').trim();old.blockReason=reason;(old.notes||=[]).push({text:'دلیل توقف: '+reason,by:actorName(APP.user.uid),date:isoToday()})}if(desired==='review'&&old.status!=='review'){const reason=String(fd.get('reviewReason')||'').trim();(old.notes||=[]).push({text:'در انتظار تأیید یا پاسخ: '+reason,by:actorName(APP.user.uid),date:isoToday()})}old.status=desired}if(!isAdmin())(old.notes||=[]).push({text:'ویرایش فعالیت توسط '+actorName(APP.user.uid),by:actorName(APP.user.uid),date:isoToday()});record('edit','ویرایش فعالیت'+(fd.get('editReason')?'؛ علت: '+fd.get('editReason'):''),old.id)}else{const t={id:id('t'),title,projectId,assignee,due,priority:String(fd.get('priority')||'normal'),weight:managerPrivate?0:isProjectControlsManager()?(+fd.get('weight')||3):0,visibility:managerPrivate?(isSystemOwner()?'owner_private':'manager_private'):'team',description:String(fd.get('description')||'').trim(),status:'todo',createdBy:APP.user.uid,createdAt:isoToday(),updatedAt:new Date().toISOString(),notes:[],submittedAt:null,evalId:null};D.tasks.push(t);record('new','فعالیت جدید ثبت شد',t.id)}closeModal();save(edit?'فعالیت ویرایش شد.':'فعالیت ثبت شد.')}
 function updateProject(fd){const p=proj(U.edit),name=String(fd.get('name')||'').trim();if(!name)return toast('نام پروژه ضروری است.',true);const workOffDays=fd.getAll('offdays').map(Number).filter(x=>Number.isInteger(x)&&x>=0&&x<=6),holidayLabels=String(fd.get('holidaysJ')||'').split(/[،,;\n]+/).map(x=>x.trim()).filter(Boolean),holidays=holidayLabels.map(jparse);if(holidays.some(x=>!x))return toast('تاریخ یکی از تعطیلات پروژه معتبر نیست.',true);if(p){Object.assign(p,{name,code:String(fd.get('code')||''),location:String(fd.get('location')||''),workOffDays,holidays});record('edit','ویرایش پروژه '+name,p.id)}else{const x={id:id('p'),name,code:String(fd.get('code')||''),location:String(fd.get('location')||''),workOffDays,holidays};D.projects.push(x);record('new','ایجاد پروژه '+name,x.id)}closeModal();save('پروژه ذخیره شد.')}
@@ -1060,7 +1139,7 @@ document.addEventListener('change',e=>{
  if(b.matches('#form-recurring [data-recurring-frequency],#form-recurring [data-recurring-monthday]')){syncRecurringFields();return}
  if(b.matches('#form-task [name="assignee"],#form-recurring [name="assignee"]')){syncManagerAssignmentFields();return}
  if(b.hasAttribute('data-actor')){U.actor=b.value;render();return}
- if(b.dataset.dailyCheck){changeTaskStatus(b.dataset.dailyCheck,b.checked?'done':'todo');return}
+ if(b.dataset.dailyCheck){changeDailyCheck(b.dataset.dailyCheck,b.checked);return}
  if(b.dataset.myStatus){changePrivateTaskStatus(b.dataset.myStatus,b.value);return}
  if(b.hasAttribute('data-task-status-selector')){const box=$('#admin-stop-reason'),ta=box?.querySelector('textarea');if(box){box.style.display=b.value==='blocked'?'':'none';if(ta)ta.required=b.value==='blocked'}const reviewBox=$('#admin-review-reason'),reviewInput=reviewBox?.querySelector('textarea');if(reviewBox){reviewBox.style.display=b.value==='review'?'':'none';if(reviewInput)reviewInput.required=b.value==='review'&&D.tasks.find(t=>t.id===U.edit)?.status!=='review'}return}
  if(b.hasAttribute('data-task-person')){U.taskPerson=b.value;render();return}if(b.hasAttribute('data-task-sort')){U.taskSort=b.value;render();return}if(b.hasAttribute('data-task-group')){U.taskGroup=b.value;render();return}if(b.dataset.filter){if(b.dataset.filter==='project')U.filterProject=b.value;else U.filterStatus=b.value;render();return}
